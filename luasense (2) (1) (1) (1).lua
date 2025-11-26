@@ -16,7 +16,7 @@ local notifications = {}
 local r_3dsky = cvar.r_3dsky
 local aa = {}
 local http = require("gamesense/http")
-
+username = js.MyPersonaAPI.GetName()
 local LOGO_URL = "https://raw.githubusercontent.com/icoblz/imagensss/refs/heads/main/loglo22-removebg-preview.png"
 local logo_tex, logo_w, logo_h, logo_loaded = nil, nil, nil, false
 local logo_state = nil
@@ -137,12 +137,18 @@ do
         if not name or name == "" then return false end
         
         local all_configs = read_config_file()
+        local username = js.MyPersonaAPI.GetName()
+        
+        -- Get current timestamp
+        local timestamp = client.system_time()
+        local date_str = js.MyPersonaAPI.GetName()
         
         all_configs[name] = {
             name = name,
             data = config_data,
-            author = ui.get(menu["visuals & misc"]["visuals"]["useridls"]) or "user",
-            timestamp = client.system_time(),
+            author = username or "user",
+            timestamp = timestamp,
+            date = date_str
         }
         
         return write_config_file(all_configs)
@@ -219,6 +225,7 @@ do
         return data
     end
 end
+
 
 local function getbuild() return "beta" end
 local function rgba(r, g, b, a, ...) return ("\a%x%x%x%x"):format(r, g, b, a) .. ... end
@@ -934,7 +941,413 @@ return (function(tbl)
                 end):sub(1, -1))
             end
         end
-    end) 
+    end)
+local cloud_system = {
+    api_url = "https://api.jsonbin.io/v3/b/69277aca43b1c97be9c73eb7",
+    api_key = "$2a$10$UgQKKAFwi8hfxafmdlPgDO69xj9Eg8QMg7Kp7p1xv2V.uuvNAYZsi",
+    
+    configs = {},
+    loading = false,
+    last_refresh = 0,
+    refresh_interval = 30,
+    
+    cache_file = ".\\luasense_cloud.cfg",
+    username = "",
+}
+
+-- Helper: Generate unique config ID
+local function generate_id()
+    local chars = "0123456789abcdefghijklmnopqrstuvwxyz"
+    local id = ""
+    for i = 1, 16 do
+        id = id .. chars:sub(math.random(1, #chars), math.random(1, #chars))
+    end
+    return id .. "_" .. client.system_time()
+end
+
+-- Save cloud cache to file
+function cloud_system:save_cache()
+    if type(writefile) ~= "function" then
+        -- Fallback to localdb if writefile not available
+        localdb.cloud_cache = {
+            configs = self.configs,
+            last_update = client.system_time(),
+            last_refresh = self.last_refresh
+        }
+        return
+    end
+    
+    local cache_data = {
+        configs = self.configs,
+        last_update = client.system_time(),
+        last_refresh = self.last_refresh,
+        username = self.username
+    }
+    
+    local ok, json_str = pcall(json.stringify, cache_data)
+    if not ok then
+        client.error_log("Failed to encode cloud cache")
+        return
+    end
+    
+    local ok2 = pcall(writefile, self.cache_file, json_str)
+    if not ok2 then
+        client.error_log("Failed to write cloud cache file")
+    end
+end
+
+-- Load cloud cache from file
+function cloud_system:load_cache()
+    -- Try file first
+    if type(readfile) == "function" then
+        local ok, content = pcall(readfile, self.cache_file)
+        if ok and content then
+            local ok2, data = pcall(json.parse, content)
+            if ok2 and type(data) == "table" then
+                self.configs = data.configs or {}
+                self.last_refresh = data.last_refresh or 0
+                
+                -- Sort by timestamp
+                table.sort(self.configs, function(a, b)
+                    return (a.timestamp or 0) > (b.timestamp or 0)
+                end)
+                
+                self:update_listbox()
+                
+                -- Auto-refresh if cache is old (older than 5 minutes)
+                local age = client.system_time() - (data.last_update or 0)
+                if age > 300 then
+                    client.delay_call(2, function()
+                        self:refresh()
+                    end)
+                end
+                return
+            end
+        end
+    end
+    
+    -- Fallback to localdb
+    local cache = localdb.cloud_cache
+    if type(cache) == "table" then
+        self.configs = cache.configs or {}
+        self.last_refresh = cache.last_refresh or 0
+        
+        table.sort(self.configs, function(a, b)
+            return (a.timestamp or 0) > (b.timestamp or 0)
+        end)
+        
+        self:update_listbox()
+        
+        local age = client.system_time() - (cache.last_update or 0)
+        if age > 300 then
+            client.delay_call(2, function()
+                self:refresh()
+            end)
+        end
+    end
+end
+
+-- Upload config to cloud
+function cloud_system:upload(config_name, config_data)
+    if self.loading then
+        push_notify("Please wait, cloud is busy...")
+        return false
+    end
+    
+    if not config_name or config_name == "" then
+        push_notify("Config name required")
+        return false
+    end
+    
+    self.loading = true
+    
+    local upload_entry = {
+        id = generate_id(),
+        name = config_name,
+        author = username or "Anonymous",
+        timestamp = client.system_time(),
+        date = 1,
+        downloads = 0,
+        data = config_data
+    }
+    
+    -- Add to existing configs
+    table.insert(self.configs, upload_entry)
+    
+    -- Sort by timestamp
+    table.sort(self.configs, function(a, b)
+        return (a.timestamp or 0) > (b.timestamp or 0)
+    end)
+    
+    -- Save to cache immediately
+    self:save_cache()
+    
+    -- Encode full database
+    local ok, json_str = pcall(json.stringify, {configs = self.configs})
+    if not ok then
+        self.loading = false
+        push_notify("Failed to encode data")
+        table.remove(self.configs, #self.configs)
+        return false
+    end
+    
+    -- Upload to JSONBin
+    http.put(self.api_url, {
+        headers = {
+            ["Content-Type"] = "application/json",
+            ["X-Master-Key"] = self.api_key,
+            ["X-Bin-Meta"] = "false"
+        },
+        body = json_str
+    }, function(success, response)
+        self.loading = false
+        
+        if not success then
+            push_notify("Upload failed: Connection error")
+            table.remove(self.configs, #self.configs)
+            self:save_cache()
+            return
+        end
+        
+        if response.status ~= 200 then
+            push_notify("Upload failed: " .. (response.status or "Unknown"))
+            table.remove(self.configs, #self.configs)
+            self:save_cache()
+            
+            if response.body then
+                local ok_parse, body_data = pcall(json.parse, response.body)
+                if ok_parse and body_data and body_data.message then
+                    push_notify("Error: " .. body_data.message)
+                end
+            end
+            return
+        end
+        
+        push_notify("Config '" .. config_name .. "' uploaded to cloud!")
+        self:update_listbox()
+        self:save_cache()
+    end)
+    
+    return true
+end
+
+-- Download all configs from cloud
+function cloud_system:refresh()
+    local now = globals.realtime()
+    if now - self.last_refresh < self.refresh_interval then
+        local wait = math.ceil(self.refresh_interval - (now - self.last_refresh))
+        push_notify("Please wait " .. wait .. " seconds before refreshing")
+        return false
+    end
+    
+    if self.loading then
+        push_notify("Already loading...")
+        return false
+    end
+    
+    self.loading = true
+    self.last_refresh = now
+    
+    http.get(self.api_url .. "/latest", {
+        headers = {
+            ["X-Master-Key"] = self.api_key
+        }
+    }, function(success, response)
+        self.loading = false
+        
+        if not success then
+            push_notify("Failed to connect to cloud")
+            return
+        end
+        
+        if response.status ~= 200 then
+            push_notify("Failed to load cloud configs: " .. response.status)
+            return
+        end
+        
+        local ok, data = pcall(json.parse, response.body)
+        if not ok or not data or not data.record then
+            push_notify("Invalid cloud data format")
+            return
+        end
+        
+        self.configs = data.record.configs or {}
+        
+        -- Sort by timestamp (newest first)
+        table.sort(self.configs, function(a, b)
+            return (a.timestamp or 0) > (b.timestamp or 0)
+        end)
+        
+        self:update_listbox()
+        self:save_cache()
+        
+        push_notify("Loaded " .. #self.configs .. " cloud configs!")
+    end)
+    
+    return true
+end
+
+-- Load selected config
+function cloud_system:load_selected(index)
+    if index < 1 or index > #self.configs then
+        push_notify("Invalid config selection")
+        return false
+    end
+    
+    local config = self.configs[index]
+    if not config or not config.data then
+        push_notify("Config data missing")
+        return false
+    end
+    
+    local cfg = config.data.LUASENSE
+    if not cfg then
+        push_notify("Invalid config format")
+        return false
+    end
+    
+    -- Apply menu settings
+    if cfg.menu then
+        for category, items in pairs(cfg.menu) do
+            for key, value in pairs(items) do
+                if menu[category] and menu[category][key] then
+                    pcall(function()
+                        if type(value) == "table" then
+                            ui.set(menu[category][key], unpack(value))
+                        else
+                            ui.set(menu[category][key], value)
+                        end
+                    end)
+                end
+            end
+        end
+    end
+    
+    -- Apply AA settings
+    for state, teams in pairs(cfg) do
+        if state == "menu" then goto skip_state end
+        if not aa[state] then goto skip_state end
+        for team, sections in pairs(teams or {}) do
+            if not aa[state][team] then goto skip_team end
+            for section_name, section in pairs(sections or {}) do
+                if section_name == "type" then
+                    pcall(ui.set, aa[state][team].type, section)
+                elseif type(section) == "table" and aa[state][team][section_name] then
+                    for k, v in pairs(section) do
+                        local ctrl = aa[state][team][section_name][k]
+                        if ctrl then
+                            pcall(function()
+                                if type(v) == "table" then
+                                    ui.set(ctrl, unpack(v))
+                                else
+                                    ui.set(ctrl, v)
+                                end
+                            end)
+                        end
+                    end
+                end
+            end
+            ::skip_team::
+        end
+        ::skip_state::
+    end
+    
+    -- Increment download count
+    config.downloads = (config.downloads or 0) + 1
+    self:save_cache()
+    
+    push_notify("Loaded '" .. config.name .. "' by " .. (config.author or "Unknown"))
+    return true
+end
+
+-- Delete own config
+function cloud_system:delete_selected(index)
+    if index < 1 or index > #self.configs then
+        push_notify("Invalid config selection")
+        return false
+    end
+    
+    local config = self.configs[index]
+    
+    -- Check if user owns this config
+    if config.author ~= self.username then
+        push_notify("You can only delete your own configs!")
+        return false
+    end
+    
+    table.remove(self.configs, index)
+    
+    -- Save to cache immediately
+    self:save_cache()
+    self:update_listbox()
+    
+    -- Update cloud
+    local ok, json_str = pcall(json.stringify, {configs = self.configs})
+    if not ok then
+        push_notify("Failed to encode data")
+        return false
+    end
+    
+    http.put(self.api_url, {
+        headers = {
+            ["Content-Type"] = "application/json",
+            ["X-Master-Key"] = self.api_key,
+            ["X-Bin-Meta"] = "false"
+        },
+        body = json_str
+    }, function(success, response)
+        if success and response.status == 200 then
+            push_notify("Config deleted from cloud!")
+        else
+            push_notify("Failed to delete config from server")
+        end
+    end)
+    
+    return true
+end
+
+-- Update listbox UI
+function cloud_system:update_listbox()
+    local items = {}
+    for i, cfg in ipairs(self.configs) do
+        local date = cfg.date or "Unknown"
+        local author = cfg.author or "Unknown"
+        local downloads = cfg.downloads or 0
+        local name = cfg.name or "Unnamed"
+        
+        local is_own = (author == self.username)
+        local prefix = is_own and "[own] " or ""
+        
+        table.insert(items, string.format("%s%s | %s | DL:%d | %s", 
+            prefix, name, author, downloads, date))
+    end
+    
+    ui.update(menu["config"]["cloud_list"], items)
+end
+
+-- Initialize
+cloud_system.username = js.MyPersonaAPI.GetName() or "Anonymous"
+
+-- Load cache on startup
+client.delay_call(0.1, function()
+    cloud_system:load_cache()
+end)
+
+-- Save cache on shutdown
+client.set_event_callback("shutdown", function()
+    cloud_system:save_cache()
+end)
+
+-- Periodic auto-save (every 30 seconds)
+local last_cloud_save = 0
+client.set_event_callback("paint", function()
+    local now = globals.realtime()
+    if now - last_cloud_save >= 30 then
+        cloud_system:save_cache()
+        last_cloud_save = now
+    end
+end)
+
     menu = {
 
         ["rage"] = {
@@ -1068,7 +1481,6 @@ return (function(tbl)
             
         },
 ["config"] = {
-    -- Main category selector
     category_label = ui.new_label("aa", "anti-aimbot angles", prefix("config system")),
     category = ui.new_combobox("aa", "anti-aimbot angles", prefix("category"), {"local", "cloud"}),
     
@@ -1076,256 +1488,11 @@ return (function(tbl)
     
     -- ===== LOCAL CONFIG SECTION =====
     local_label = ui.new_label("aa", "anti-aimbot angles", prefix("local configs")),
-    local_list = ui.new_listbox("aa", "anti-aimbot angles", "\nlocal configs list", {}),
-    
+    local_list = ui.new_listbox("aa", "anti-aimbot angles", "\nlocal configs", {}),
     local_name = ui.new_textbox("aa", "anti-aimbot angles", prefix("config name")),
     
-    local_save = ui.new_button("aa", "anti-aimbot angles", string.format("\a32a852FFsave \a89f596FF%s", ""), function()
-    local cfg_name = ui.get(menu["config"]["local_name"])
-    if not cfg_name or cfg_name == "" then
-        push_notify("Please enter a config name")
-        return
-    end
-    
-    -- Export current settings
-    local export_data = { LUASENSE = {} }
-    
-    -- Copy all AA settings
-    for state, teams in pairs(aa) do
-        export_data.LUASENSE[state] = export_data.LUASENSE[state] or {}
-        for team, block in pairs(teams) do
-            export_data.LUASENSE[state][team] = export_data.LUASENSE[state][team] or {}
-            for section_name, section in pairs(block) do
-                if section_name == "button" then goto continue_section end
-                if section_name == "type" then
-                    local ok, val = pcall(ui.get, section)
-                    export_data.LUASENSE[state][team][section_name] = ok and val or nil
-                elseif type(section) == "table" then
-                    export_data.LUASENSE[state][team][section_name] = {}
-                    for k, ctrl in pairs(section) do
-                        local ok, val = pcall(ui.get, ctrl)
-                        if ok and val ~= nil then
-                            export_data.LUASENSE[state][team][section_name][k] = val
-                        end
-                    end
-                end
-                ::continue_section::
-            end
-        end
-    end
-    
-    -- Copy menu settings
-    export_data.LUASENSE.menu = {}
-    for category, items in pairs(menu) do
-        if category == "config" then goto skip_category end
-        export_data.LUASENSE.menu[category] = {}
-        for key, ctrl in pairs(items) do
-            local ok, val = pcall(ui.get, ctrl)
-            if ok and val ~= nil then
-                export_data.LUASENSE.menu[category][key] = val
-            end
-        end
-        ::skip_category::
-    end
-    
-    -- Save to file
-    local success = config_file.save(cfg_name, export_data)
-    
-    if success then
-        -- Update list
-        local items = {}
-        local list = config_file.list()
-        for i, entry in ipairs(list) do
-            table.insert(items, string.format("%s [%s]", entry.name, entry.date))
-        end
-        ui.update(menu["config"]["local_list"], items)
-        
-        push_notify("Config '" .. cfg_name .. "' saved to luasense.cfg!")
-    else
-        push_notify("Failed to save config!")
-    end
-end),
-
--- Replace the local_load button callback:
-local_load = ui.new_button("aa", "anti-aimbot angles", string.format("\a89f596FFload \a32a852FF%s", ""), function()
-    local list = config_file.list()
-    local selected_idx = ui.get(menu["config"]["local_list"]) + 1
-    
-    if selected_idx <= 0 or selected_idx > #list then
-        push_notify("Please select a config to load")
-        return
-    end
-    
-    local cfg_name = list[selected_idx].name
-    local config_data, entry = config_file.load(cfg_name)
-    
-    if not config_data then
-        push_notify("Config data not found")
-        return
-    end
-    
-    local cfg = config_data.LUASENSE
-    
-    -- Apply menu settings
-    if cfg.menu then
-        for category, items in pairs(cfg.menu) do
-            for key, value in pairs(items) do
-                if menu[category] and menu[category][key] then
-                    pcall(function()
-                        if type(value) == "table" then
-                            ui.set(menu[category][key], unpack(value))
-                        else
-                            ui.set(menu[category][key], value)
-                        end
-                    end)
-                end
-            end
-        end
-    end
-    
-    -- Apply AA settings
-    for state, teams in pairs(cfg) do
-        if state == "menu" then goto skip_state end
-        if not aa[state] then goto skip_state end
-        for team, sections in pairs(teams or {}) do
-            if not aa[state][team] then goto skip_team end
-            for section_name, section in pairs(sections or {}) do
-                if section_name == "type" then
-                    pcall(ui.set, aa[state][team].type, section)
-                elseif type(section) == "table" and aa[state][team][section_name] then
-                    for k, v in pairs(section) do
-                        local ctrl = aa[state][team][section_name][k]
-                        if ctrl then
-                            pcall(function()
-                                if type(v) == "table" then
-                                    ui.set(ctrl, unpack(v))
-                                else
-                                    ui.set(ctrl, v)
-                                end
-                            end)
-                        end
-                    end
-                end
-            end
-            ::skip_team::
-        end
-        ::skip_state::
-    end
-    
-    push_notify("Config '" .. cfg_name .. "' loaded!")
-end),
-
--- Replace the local_export button callback:
-local_export = ui.new_button("aa", "anti-aimbot angles", string.format("\a89f596FFexport \aFFFFFFFF%s", ""), function()
-    local list = config_file.list()
-    local selected_idx = ui.get(menu["config"]["local_list"]) + 1
-    
-    -- If no config selected, export current settings
-    if selected_idx <= 0 or selected_idx > #list then
-        local export_data = { LUASENSE = {} }
-        
-        -- Export current AA settings
-        for state, teams in pairs(aa) do
-            export_data.LUASENSE[state] = export_data.LUASENSE[state] or {}
-            for team, block in pairs(teams) do
-                export_data.LUASENSE[state][team] = export_data.LUASENSE[state][team] or {}
-                for section_name, section in pairs(block) do
-                    if section_name == "button" then goto next_section end
-                    if section_name == "type" then
-                        local ok, val = pcall(ui.get, section)
-                        export_data.LUASENSE[state][team][section_name] = ok and val or nil
-                    elseif type(section) == "table" then
-                        export_data.LUASENSE[state][team][section_name] = {}
-                        for k, ctrl in pairs(section) do
-                            local ok, val = pcall(ui.get, ctrl)
-                            if ok and val ~= nil then
-                                export_data.LUASENSE[state][team][section_name][k] = val
-                            end
-                        end
-                    end
-                    ::next_section::
-                end
-            end
-        end
-        
-        -- Export menu settings
-        export_data.LUASENSE.menu = {}
-        for category, items in pairs(menu) do
-            if category == "config" then goto skip_cat end
-            export_data.LUASENSE.menu[category] = {}
-            for key, ctrl in pairs(items) do
-                local ok, val = pcall(ui.get, ctrl)
-                if ok and val ~= nil then
-                    export_data.LUASENSE.menu[category][key] = val
-                end
-            end
-            ::skip_cat::
-        end
-        
-        -- Encode to base64
-        local ok, json_str = pcall(json.stringify, export_data)
-        if not ok then
-            push_notify("Failed to encode config")
-            return
-        end
-        
-        local ok2, encoded = pcall(base64.encode, json_str)
-        if not ok2 then
-            push_notify("Failed to encode config")
-            return
-        end
-        
-        clipboard.export(encoded)
-        push_notify("Current settings exported to clipboard!")
-    else
-        -- Export selected config
-        local cfg_name = list[selected_idx].name
-        local encoded = config_file.export(cfg_name)
-        
-        if not encoded then
-            push_notify("Failed to export config")
-            return
-        end
-        
-        clipboard.export(encoded)
-        push_notify("Config '" .. cfg_name .. "' exported to clipboard!")
-    end
-end),
-
--- Replace the local_delete button callback:
-local_delete = ui.new_button("aa", "anti-aimbot angles", string.format("\aC84632FFdelete \aFFFFFFFF%s", ""), function()
-    local list = config_file.list()
-    local selected_idx = ui.get(menu["config"]["local_list"]) + 1
-    
-    if selected_idx <= 0 or selected_idx > #list then
-        push_notify("Please select a config to delete")
-        return
-    end
-    
-    local cfg_name = list[selected_idx].name
-    local success = config_file.delete(cfg_name)
-    
-    if success then
-        -- Update list
-        local items = {}
-        local new_list = config_file.list()
-        for i, entry in ipairs(new_list) do
-            table.insert(items, string.format("%s [%s]", entry.name, entry.date))
-        end
-        ui.update(menu["config"]["local_list"], items)
-        
-        push_notify("Config '" .. cfg_name .. "' deleted!")
-    else
-        push_notify("Failed to delete config!")
-    end
-end),
-    
-    -- ===== CLOUD CONFIG SECTION =====
-    cloud_label = ui.new_label("aa", "anti-aimbot angles", prefix("cloud configs")),
-    cloud_name = ui.new_textbox("aa", "anti-aimbot angles", prefix("cloud config name")),
-    
-    cloud_upload = ui.new_button("aa", "anti-aimbot angles", string.format("\a32a852FFupload to cloud \a89f596FF%s", ""), function()
-        local cfg_name = ui.get(menu["config"]["cloud_name"])
+    local_save = ui.new_button("aa", "anti-aimbot angles", "\a32a852FFsave", function()
+        local cfg_name = ui.get(menu["config"]["local_name"])
         if not cfg_name or cfg_name == "" then
             push_notify("Please enter a config name")
             return
@@ -1372,49 +1539,36 @@ end),
             ::skip_category::
         end
         
-        -- Encode to base64
-        local ok, json_str = pcall(json.stringify, export_data)
-        if not ok then
-            push_notify("Failed to encode config")
-            return
-        end
+        -- Save to file
+        local success = config_file.save(cfg_name, export_data)
         
-        local ok2, encoded = pcall(base64.encode, json_str)
-        if not ok2 then
-            push_notify("Failed to encode config")
-            return
+        if success then
+            local items = {}
+            local list = config_file.list()
+            for i, entry in ipairs(list) do
+                table.insert(items, string.format("%s [%s]", entry.name, entry.date))
+            end
+            ui.update(menu["config"]["local_list"], items)
+            push_notify("Config '" .. cfg_name .. "' saved!")
+        else
+            push_notify("Failed to save config")
         end
-        
-        clipboard.export(encoded)
-        push_notify("Config code copied to clipboard! Share it with others.")
     end),
     
-    cloud_code = ui.new_textbox("aa", "anti-aimbot angles", prefix("paste code here")),
-    
-    cloud_download = ui.new_button("aa", "anti-aimbot angles", string.format("\a89f596FFdownload from cloud \a32a852FF%s", ""), function()
-        local paste_code = ui.get(menu["config"]["cloud_code"])
-        if not paste_code or paste_code == "" then
-            -- Try clipboard
-            local ok, clip = pcall(clipboard.import)
-            if ok and clip and clip ~= "" then
-                paste_code = clip
-            else
-                push_notify("Please paste a config code")
-                return
-            end
-        end
+    local_load = ui.new_button("aa", "anti-aimbot angles", "\a89f596FFload", function()
+        local list = config_file.list()
+        local selected_idx = ui.get(menu["config"]["local_list"]) + 1
         
-        -- Decode base64
-        local ok, json_str = pcall(base64.decode, paste_code)
-        if not ok then
-            push_notify("Failed to decode config")
+        if selected_idx <= 0 or selected_idx > #list then
+            push_notify("Please select a config to load")
             return
         end
         
-        -- Parse JSON
-        local ok2, config_data = pcall(json.parse, json_str)
-        if not ok2 or not config_data or not config_data.LUASENSE then
-            push_notify("Invalid config format")
+        local cfg_name = list[selected_idx].name
+        local config_data, entry = config_file.load(cfg_name)
+        
+        if not config_data then
+            push_notify("Config data not found")
             return
         end
         
@@ -1466,42 +1620,104 @@ end),
             ::skip_state::
         end
         
-        push_notify("Cloud config downloaded successfully!")
+        push_notify("Config '" .. cfg_name .. "' loaded!")
     end),
-},
+    
+    local_delete = ui.new_button("aa", "anti-aimbot angles", "\aC84632FFdelete", function()
+        local list = config_file.list()
+        local selected_idx = ui.get(menu["config"]["local_list"]) + 1
+        
+        if selected_idx <= 0 or selected_idx > #list then
+            push_notify("Please select a config to delete")
+            return
+        end
+        
+        local cfg_name = list[selected_idx].name
+        local success = config_file.delete(cfg_name)
+        
+        if success then
+            local items = {}
+            local new_list = config_file.list()
+            for i, entry in ipairs(new_list) do
+                table.insert(items, string.format("%s [%s]", entry.name, entry.date))
+            end
+            ui.update(menu["config"]["local_list"], items)
+            push_notify("Config '" .. cfg_name .. "' deleted!")
+        else
+            push_notify("Failed to delete config")
+        end
+    end),
+    
+    local_upload = ui.new_button("aa", "anti-aimbot angles", "\a32a852FFupload to cloud", function()
+        local list = config_file.list()
+        local selected_idx = ui.get(menu["config"]["local_list"]) + 1
+        
+        if selected_idx <= 0 or selected_idx > #list then
+            push_notify("Please select a config to upload")
+            return
+        end
+        
+        local cfg_name = list[selected_idx].name
+        local config_data, entry = config_file.load(cfg_name)
+        
+        if not config_data then
+            push_notify("Config data not found")
+            return
+        end
+        
+        cloud_system:upload(cfg_name, config_data)
+    end),
+    
+    -- ===== CLOUD CONFIG SECTION =====
+    cloud_label = ui.new_label("aa", "anti-aimbot angles", prefix("cloud configs")),
+    cloud_list = ui.new_listbox("aa", "anti-aimbot angles", "\ncloud configs", {}),
+    
+    cloud_refresh = ui.new_button("aa", "anti-aimbot angles", "\a89f596FFrefresh", function()
+        cloud_system:refresh()
+    end),
+    
+    cloud_load = ui.new_button("aa", "anti-aimbot angles", "\a32a852FFload selected", function()
+        local selected_idx = ui.get(menu["config"]["cloud_list"]) + 1
+        cloud_system:load_selected(selected_idx)
+    end),
+    
+    cloud_delete = ui.new_button("aa", "anti-aimbot angles", "\aC84632FFdelete (own only)", function()
+        local selected_idx = ui.get(menu["config"]["cloud_list"]) + 1
+        cloud_system:delete_selected(selected_idx)
+    end),
+    
+    cloud_info = ui.new_label("aa", "anti-aimbot angles", "Upload from local configs | Download to use"),
+    }
 }
-
--- Update the menu visibility callback to handle config section
--- Add this to your existing tbl.callbacks["menu"] function, in the visibility logic:
-
--- In the for loop where you handle menu visibility, add:
 if i == "config" then
     for ii, vv in next, value do
         local fix = true
         local config_cat = ui.get(menu["config"]["category"])
         
-        -- Local config visibility
-        if ii == "local_label" or ii == "local_list" or ii == "local_name" or 
-           ii == "local_save" or ii == "local_load" or ii == "local_export" or 
-           ii == "local_import" or ii == "local_delete" then
-            fix = (config_cat == "local")
-        end
-        
-        -- Cloud config visibility
-        if ii == "cloud_label" or ii == "cloud_name" or ii == "cloud_upload" or 
-           ii == "cloud_code" or ii == "cloud_download" then
-            fix = (config_cat == "cloud")
-        end
-        
         -- Always visible
         if ii == "category_label" or ii == "category" or ii == "separator" then
             fix = true
+        
+        -- Local config visibility
+        elseif ii == "local_label" or ii == "local_list" or ii == "local_name" or 
+               ii == "local_save" or ii == "local_load" or ii == "local_delete" or 
+               ii == "local_upload" then
+            fix = (config_cat == "local")
+        
+        -- Cloud config visibility
+        elseif ii == "cloud_label" or ii == "cloud_list" or ii == "cloud_refresh" or 
+               ii == "cloud_load" or ii == "cloud_delete" or ii == "cloud_info" then
+            fix = (config_cat == "cloud")
+        
+        else
+            fix = false
         end
         
         ui.set_visible(vv, i == current and fix)
     end
 end
 
+-- Initialize local config list on load
 client.delay_call(0.1, function()
     local items = {}
     local list = config_file.list()
@@ -1510,6 +1726,7 @@ client.delay_call(0.1, function()
     end
     ui.update(menu["config"]["local_list"], items)
 end)
+
     for i, v in next, tbl.states do
         aa[v] = {}
         for index, value in next, {"ct", "t"} do
