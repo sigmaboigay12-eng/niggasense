@@ -819,7 +819,9 @@ return (function(tbl)
             end
         end
     end)
+    
     menu = {
+
         ["rage"] = {
             remove_3d_sky = ui.new_checkbox("aa", "anti-aimbot angles", prefix("remove 3d sky"), true),
             resolver = ui.new_combobox("aa", "anti-aimbot angles", prefix("target name indicator"), {"no", "yes"}),
@@ -951,6 +953,376 @@ return (function(tbl)
             
         },
         ["config"] = {
+            -- Local config management
+            local_configs_label = ui.new_label("aa", "anti-aimbot angles", prefix("local configs")),
+            local_config_list = ui.new_listbox("aa", "anti-aimbot angles", prefix("\nlocalconfiglist"), {}),
+            config_name_input = ui.new_textbox("aa", "anti-aimbot angles", prefix("\nconfigname")),
+            
+            save_local = ui.new_button("aa", "anti-aimbot angles", "\a32a852FF save config", function()
+                local cfg_name = ui.get(menu["config"]["config_name_input"])
+                if not cfg_name or cfg_name == "" then
+                    push_notify("Please enter a config name")
+                    return
+                end
+                
+                local export_data = { LUASENSE = {} }
+                
+                for state, teams in pairs(aa) do
+                    export_data.LUASENSE[state] = export_data.LUASENSE[state] or {}
+                    for team, block in pairs(teams) do
+                        export_data.LUASENSE[state][team] = export_data.LUASENSE[state][team] or {}
+                        for section_name, section in pairs(block) do
+                            if section_name == "button" then goto next_section end
+                            if section_name == "type" then
+                                local ok, val = pcall(ui.get, section)
+                                export_data.LUASENSE[state][team][section_name] = ok and val or nil
+                            elseif type(section) == "table" then
+                                export_data.LUASENSE[state][team][section_name] = {}
+                                for k, ctrl in pairs(section) do
+                                    local ok, val = pcall(ui.get, ctrl)
+                                    if ok and val ~= nil then
+                                        export_data.LUASENSE[state][team][section_name][k] = val
+                                    end
+                                end
+                            end
+                            ::next_section::
+                        end
+                    end
+                end
+                
+                export_data.LUASENSE.extra = {}
+                for key, container in pairs(menu["anti aimbot"]) do
+                    if key == "submenu" then
+                        local ok, val = pcall(ui.get, container)
+                        export_data.LUASENSE.extra[key] = ok and val or nil
+                    elseif type(container) == "table" then
+                        export_data.LUASENSE.extra[key] = {}
+                        for name, item in pairs(container) do
+                            local ok, val = pcall(ui.get, item)
+                            if ok and val ~= nil then
+                                export_data.LUASENSE.extra[key][name] = val
+                            end
+                        end
+                    end
+                end
+                
+                local saved_configs = localdb.saved_configs or {}
+                saved_configs[cfg_name] = {
+                    name = cfg_name,
+                    data = export_data,
+                    timestamp = client.system_time()
+                }
+                localdb.saved_configs = saved_configs
+                
+                local config_names = {}
+                for name, _ in pairs(saved_configs) do
+                    table.insert(config_names, name)
+                end
+                table.sort(config_names)
+                ui.update(menu["config"]["local_config_list"], config_names)
+                
+                push_notify("Config '" .. cfg_name .. "' saved!")
+            end),
+            
+            load_local = ui.new_button("aa", "anti-aimbot angles", "\a89f596FF load config", function()
+                local saved_configs = localdb.saved_configs or {}
+                local config_names = {}
+                for name, _ in pairs(saved_configs) do
+                    table.insert(config_names, name)
+                end
+                table.sort(config_names)
+                
+                local selected_idx = ui.get(menu["config"]["local_config_list"]) + 1
+                if selected_idx <= 0 or selected_idx > #config_names then
+                    push_notify("Please select a config to load")
+                    return
+                end
+                
+                local cfg_name = config_names[selected_idx]
+                local config_entry = saved_configs[cfg_name]
+                if not config_entry or not config_entry.data then
+                    push_notify("Config data not found")
+                    return
+                end
+                
+                local cfg = config_entry.data.LUASENSE
+                if not cfg then
+                    push_notify("Invalid config format")
+                    return
+                end
+                
+                if cfg.extra then
+                    for section, items in pairs(cfg.extra) do
+                        if section == "submenu" then
+                            pcall(ui.set, menu["anti aimbot"][section], items)
+                        elseif type(items) == "table" then
+                            for name, value in pairs(items) do
+                                if menu["anti aimbot"][section] and menu["anti aimbot"][section][name] then
+                                    pcall(function()
+                                        if type(value) == "table" then
+                                            ui.set(menu["anti aimbot"][section][name], unpack(value))
+                                        else
+                                            ui.set(menu["anti aimbot"][section][name], value)
+                                        end
+                                    end)
+                                end
+                            end
+                        end
+                    end
+                end
+                
+                for state, teams in pairs(cfg) do
+                    if state == "extra" then goto skip_state end
+                    if not aa[state] then goto skip_state end
+                    for team, sections in pairs(teams or {}) do
+                        if not aa[state][team] then goto skip_team end
+                        for section_name, section in pairs(sections or {}) do
+                            if section_name == "type" then
+                                pcall(ui.set, aa[state][team].type, section)
+                            elseif type(section) == "table" and aa[state][team][section_name] then
+                                for k, v in pairs(section) do
+                                    local ctrl = aa[state][team][section_name][k]
+                                    if ctrl then
+                                        pcall(function()
+                                            if type(v) == "table" then
+                                                ui.set(ctrl, unpack(v))
+                                            else
+                                                ui.set(ctrl, v)
+                                            end
+                                        end)
+                                    end
+                                end
+                            end
+                        end
+                        ::skip_team::
+                    end
+                    ::skip_state::
+                end
+                
+                push_notify("Config '" .. cfg_name .. "' loaded!")
+            end),
+            
+            delete_local = ui.new_button("aa", "anti-aimbot angles", "\aC84632FF delete config", function()
+                local saved_configs = localdb.saved_configs or {}
+                local config_names = {}
+                for name, _ in pairs(saved_configs) do
+                    table.insert(config_names, name)
+                end
+                table.sort(config_names)
+                
+                local selected_idx = ui.get(menu["config"]["local_config_list"]) + 1
+                if selected_idx <= 0 or selected_idx > #config_names then
+                    push_notify("Please select a config to delete")
+                    return
+                end
+                
+                local cfg_name = config_names[selected_idx]
+                saved_configs[cfg_name] = nil
+                localdb.saved_configs = saved_configs
+                
+                config_names = {}
+                for name, _ in pairs(saved_configs) do
+                    table.insert(config_names, name)
+                end
+                table.sort(config_names)
+                ui.update(menu["config"]["local_config_list"], config_names)
+                
+                push_notify("Config '" .. cfg_name .. "' deleted!")
+            end),
+            
+            cloud_label = ui.new_label("aa", "anti-aimbot angles", prefix("cloud configs")),
+            cloudlist = ui.new_listbox("aa", "anti-aimbot angles", prefix("\ncloudlist"), {}),
+            cloud_code_input = ui.new_textbox("aa", "anti-aimbot angles", prefix("\ncloudcode")),
+            
+            upload_cloud = ui.new_button("aa", "anti-aimbot angles", "\a32a852FF upload to cloud", function()
+                local cfg_name = ui.get(menu["config"]["config_name_input"])
+                if not cfg_name or cfg_name == "" then
+                    push_notify("Please enter a config name")
+                    return
+                end
+                
+                local export_data = { LUASENSE = {} }
+                
+                for state, teams in pairs(aa) do
+                    export_data.LUASENSE[state] = {}
+                    for team, block in pairs(teams) do
+                        export_data.LUASENSE[state][team] = {}
+                        for section_name, section in pairs(block) do
+                            if section_name == "button" then goto next_section2 end
+                            if section_name == "type" then
+                                local ok, val = pcall(ui.get, section)
+                                export_data.LUASENSE[state][team][section_name] = ok and val or nil
+                            elseif type(section) == "table" then
+                                export_data.LUASENSE[state][team][section_name] = {}
+                                for k, ctrl in pairs(section) do
+                                    local ok, val = pcall(ui.get, ctrl)
+                                    if ok and val ~= nil then
+                                        export_data.LUASENSE[state][team][section_name][k] = val
+                                    end
+                                end
+                            end
+                            ::next_section2::
+                        end
+                    end
+                end
+                
+                export_data.LUASENSE.extra = {}
+                for key, container in pairs(menu["anti aimbot"]) do
+                    if key == "submenu" then
+                        local ok, val = pcall(ui.get, container)
+                        export_data.LUASENSE.extra[key] = ok and val or nil
+                    elseif type(container) == "table" then
+                        export_data.LUASENSE.extra[key] = {}
+                        for name, item in pairs(container) do
+                            local ok, val = pcall(ui.get, item)
+                            if ok and val ~= nil then
+                                export_data.LUASENSE.extra[key][name] = val
+                            end
+                        end
+                    end
+                end
+                
+                local upload_data = {
+                    name = cfg_name,
+                    author = ui.get(menu["visuals & misc"]["visuals"]["useridls"]) or "Anonymous",
+                    timestamp = client.system_time(),
+                    data = export_data
+                }
+                
+                local ok, json_str = pcall(json.stringify, upload_data)
+                if not ok then
+                    push_notify("Failed to encode config")
+                    return
+                end
+                
+                local ok2, compressed = pcall(base64.encode, json_str)
+                if not ok2 then
+                    push_notify("Failed to compress config")
+                    return
+                end
+                
+                local paste_data = string.format(
+                    "api_dev_key=%s&api_option=paste&api_paste_code=%s&api_paste_private=1&api_paste_name=%s&api_paste_expire_date=N",
+                    "fuaQwIZiKNi2mA6D3fxsTPyX40Wgt7eh",
+                    compressed:gsub("([^%w])", function(c) return string.format("%%%02X", string.byte(c)) end),
+                    ("LuaSense - " .. cfg_name):gsub("([^%w])", function(c) return string.format("%%%02X", string.byte(c)) end)
+                )
+                
+                http.post("https://pastebin.com/api/api_post.php", {
+                    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+                    body = paste_data
+                }, function(success, response)
+                    if not success or response.status ~= 200 then
+                        push_notify("Upload failed: " .. (response and tostring(response.status) or "Network error"))
+                        return
+                    end
+                    
+                    local paste_url = response.body
+                    local paste_id = paste_url:match("pastebin%.com/(%w+)$")
+                    
+                    if not paste_id then
+                        push_notify("Failed to get paste ID")
+                        return
+                    end
+                    
+                    clipboard.export(paste_id)
+                    push_notify("Uploaded! Code: " .. paste_id .. " (copied)")
+                    
+                    local cloud_configs = localdb.cloud_configs or {}
+                    table.insert(cloud_configs, {
+                        id = paste_id,
+                        name = cfg_name,
+                        author = upload_data.author,
+                        timestamp = upload_data.timestamp
+                    })
+                    localdb.cloud_configs = cloud_configs
+                    
+                    local items = {}
+                    for i, v in ipairs(cloud_configs) do
+                        table.insert(items, string.format("[%s] %s", v.name, v.author))
+                    end
+                    ui.update(menu["config"]["cloudlist"], items)
+                end)
+            end),
+            
+            download_cloud = ui.new_button("aa", "anti-aimbot angles", "\a89f596FF download from cloud", function()
+                local paste_id = ui.get(menu["config"]["cloud_code_input"])
+                if not paste_id or paste_id == "" then
+                    push_notify("Please enter a paste code")
+                    return
+                end
+                
+                http.get("https://pastebin.com/raw/" .. paste_id, function(success, response)
+                    if not success or response.status ~= 200 then
+                        push_notify("Download failed: " .. (response and tostring(response.status) or "Network error"))
+                        return
+                    end
+                    
+                    local ok, json_str = pcall(base64.decode, response.body)
+                    if not ok then
+                        push_notify("Failed to decompress")
+                        return
+                    end
+                    
+                    local ok2, config_data = pcall(json.parse, json_str)
+                    if not ok2 or type(config_data) ~= "table" or not config_data.data then
+                        push_notify("Invalid config format")
+                        return
+                    end
+                    
+                    local cfg = config_data.data.LUASENSE
+                    if cfg.extra then
+                        for section, items in pairs(cfg.extra) do
+                            if section == "submenu" then
+                                pcall(ui.set, menu["anti aimbot"][section], items)
+                            elseif type(items) == "table" then
+                                for name, value in pairs(items) do
+                                    if menu["anti aimbot"][section] and menu["anti aimbot"][section][name] then
+                                        pcall(function()
+                                            if type(value) == "table" then
+                                                ui.set(menu["anti aimbot"][section][name], unpack(value))
+                                            else
+                                                ui.set(menu["anti aimbot"][section][name], value)
+                                            end
+                                        end)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    
+                    for state, teams in pairs(cfg) do
+                        if state == "extra" then goto skip_state2 end
+                        if not aa[state] then goto skip_state2 end
+                        for team, sections in pairs(teams or {}) do
+                            if not aa[state][team] then goto skip_team2 end
+                            for section_name, section in pairs(sections or {}) do
+                                if section_name == "type" then
+                                    pcall(ui.set, aa[state][team].type, section)
+                                elseif type(section) == "table" and aa[state][team][section_name] then
+                                    for k, v in pairs(section) do
+                                        local ctrl = aa[state][team][section_name][k]
+                                        if ctrl then
+                                            pcall(function()
+                                                if type(v) == "table" then
+                                                    ui.set(ctrl, unpack(v))
+                                                else
+                                                    ui.set(ctrl, v)
+                                                end
+                                            end)
+                                        end
+                                    end
+                                end
+                            end
+                            ::skip_team2::
+                        end
+                        ::skip_state2::
+                    end
+                    
+                    push_notify("Config loaded from cloud!")
+                end)
+            end),
+            
             config_selector = ui.new_combobox("aa", "anti-aimbot angles", prefix("select config"), {"meta", "aggressive delayed jitter", "safe delayed jitter", "aggressive jitter", "safe jitter", "perfect jitter", "perfect delay jitter"}),
             load = ui.new_button("aa", "anti-aimbot angles", "\ac8c8c8FF load", function()
                 local selected_config = ui.get(menu["config"]["config_selector"])
@@ -1018,7 +1390,6 @@ return (function(tbl)
                     if not ok then return nil end
                     return val
                 end
-
                 
                 for state, teams in pairs(aa) do
                     export_table.LUASENSE[state] = export_table.LUASENSE[state] or {}
@@ -2288,9 +2659,6 @@ return (function(tbl)
         return false
     end
 
-    
-    
-    
 
     local function save_antibf()
         local ok, err = pcall(function()
@@ -2303,12 +2671,7 @@ return (function(tbl)
                 }
             }
             
-            -- Try database.write first
-            local db_ok = pcall(database.write, ANTIBF_DB_KEY, data_to_save)
-            if not db_ok then
-                -- Fallback to localdb if database.write fails
-                localdb.antibf_data = data_to_save
-            end
+            localdb.antibf_data = data_to_save
         end)
         
         if not ok then
@@ -2318,13 +2681,7 @@ return (function(tbl)
 
     local function load_antibf()
         local ok, err = pcall(function()
-            -- Try database.read first
-            local db_ok, data = pcall(database.read, ANTIBF_DB_KEY)
-            
-            if not db_ok or type(data) ~= "table" then
-                -- Fallback to localdb
-                data = localdb.antibf_data
-            end
+            local data = localdb.antibf_data
             
             if type(data) == "table" then
                 if type(data.log) == "table" then 
