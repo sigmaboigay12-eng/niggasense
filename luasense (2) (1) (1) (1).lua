@@ -953,7 +953,6 @@ return (function(tbl)
             
         },
         ["config"] = {
-            -- Local config management
             local_configs_label = ui.new_label("aa", "anti-aimbot angles", prefix("local configs")),
             local_config_list = ui.new_listbox("aa", "anti-aimbot angles", prefix("\nlocalconfiglist"), {}),
             config_name_input = ui.new_textbox("aa", "anti-aimbot angles", prefix("\nconfigname")),
@@ -1101,7 +1100,123 @@ return (function(tbl)
                 
                 push_notify("Config '" .. cfg_name .. "' loaded!")
             end),
+            export_local = ui.new_button("aa", "anti-aimbot angles", "\a89f596FF export to clipboard", function()
+                local saved_configs = localdb.saved_configs or {}
+                local config_names = {}
+                for name, _ in pairs(saved_configs) do
+                    table.insert(config_names, name)
+                end
+                table.sort(config_names)
+                
+                local selected_idx = ui.get(menu["config"]["local_config_list"]) + 1
+                if selected_idx <= 0 or selected_idx > #config_names then
+                    push_notify("Please select a config to export")
+                    return
+                end
+                
+                local cfg_name = config_names[selected_idx]
+                local config_entry = saved_configs[cfg_name]
+                if not config_entry or not config_entry.data then
+                    push_notify("Config data not found")
+                    return
+                end
+                
+                -- Encode config to base64
+                local ok, json_str = pcall(json.stringify, config_entry.data)
+                if not ok then
+                    push_notify("Failed to encode config")
+                    return
+                end
+                
+                local ok2, encoded = pcall(base64.encode, json_str)
+                if not ok2 then
+                    push_notify("Failed to encode config")
+                    return
+                end
+                
+                -- Copy to clipboard
+                clipboard.export(encoded)
+                
+                push_notify("Config '" .. cfg_name .. "' exported to clipboard!")
+            end),
             
+            -- Import from clipboard
+            import_local = ui.new_button("aa", "anti-aimbot angles", "\a32a852FF import from clipboard", function()
+                -- Get clipboard content
+                local ok, clip = pcall(clipboard.import)
+                if not ok or not clip or clip == "" then
+                    push_notify("Clipboard is empty or invalid")
+                    return
+                end
+                
+                -- Decode base64
+                local ok2, json_str = pcall(base64.decode, clip)
+                if not ok2 then
+                    push_notify("Failed to decode config data")
+                    return
+                end
+                
+                -- Parse JSON
+                local ok3, config_data = pcall(json.parse, json_str)
+                if not ok3 or not config_data or not config_data.LUASENSE then
+                    push_notify("Invalid config format")
+                    return
+                end
+                
+                local cfg = config_data.LUASENSE
+                
+                -- Apply extra settings
+                if cfg.extra then
+                    for section, items in pairs(cfg.extra) do
+                        if section == "submenu" then
+                            pcall(ui.set, menu["anti aimbot"][section], items)
+                        elseif type(items) == "table" then
+                            for name, value in pairs(items) do
+                                if menu["anti aimbot"][section] and menu["anti aimbot"][section][name] then
+                                    pcall(function()
+                                        if type(value) == "table" then
+                                            ui.set(menu["anti aimbot"][section][name], unpack(value))
+                                        else
+                                            ui.set(menu["anti aimbot"][section][name], value)
+                                        end
+                                    end)
+                                end
+                            end
+                        end
+                    end
+                end
+                
+                -- Apply AA settings
+                for state, teams in pairs(cfg) do
+                    if state == "extra" then goto skip_state end
+                    if not aa[state] then goto skip_state end
+                    for team, sections in pairs(teams or {}) do
+                        if not aa[state][team] then goto skip_team end
+                        for section_name, section in pairs(sections or {}) do
+                            if section_name == "type" then
+                                pcall(ui.set, aa[state][team].type, section)
+                            elseif type(section) == "table" and aa[state][team][section_name] then
+                                for k, v in pairs(section) do
+                                    local ctrl = aa[state][team][section_name][k]
+                                    if ctrl then
+                                        pcall(function()
+                                            if type(v) == "table" then
+                                                ui.set(ctrl, unpack(v))
+                                            else
+                                                ui.set(ctrl, v)
+                                            end
+                                        end)
+                                    end
+                                end
+                            end
+                        end
+                        ::skip_team::
+                    end
+                    ::skip_state::
+                end
+                
+                push_notify("Config imported from clipboard successfully!")
+            end),
             delete_local = ui.new_button("aa", "anti-aimbot angles", "\aC84632FF delete config", function()
                 local saved_configs = localdb.saved_configs or {}
                 local config_names = {}
@@ -1128,407 +1243,6 @@ return (function(tbl)
                 ui.update(menu["config"]["local_config_list"], config_names)
                 
                 push_notify("Config '" .. cfg_name .. "' deleted!")
-            end),
-            
-            cloud_label = ui.new_label("aa", "anti-aimbot angles", prefix("cloud configs")),
-            cloudlist = ui.new_listbox("aa", "anti-aimbot angles", prefix("\ncloudlist"), {}),
-            cloud_code_input = ui.new_textbox("aa", "anti-aimbot angles", prefix("\ncloudcode")),
-            
-            upload_cloud = ui.new_button("aa", "anti-aimbot angles", "\a32a852FF upload to cloud", function()
-                local cfg_name = ui.get(menu["config"]["config_name_input"])
-                if not cfg_name or cfg_name == "" then
-                    push_notify("Please enter a config name")
-                    return
-                end
-                
-                local export_data = { LUASENSE = {} }
-                
-                for state, teams in pairs(aa) do
-                    export_data.LUASENSE[state] = {}
-                    for team, block in pairs(teams) do
-                        export_data.LUASENSE[state][team] = {}
-                        for section_name, section in pairs(block) do
-                            if section_name == "button" then goto next_section2 end
-                            if section_name == "type" then
-                                local ok, val = pcall(ui.get, section)
-                                export_data.LUASENSE[state][team][section_name] = ok and val or nil
-                            elseif type(section) == "table" then
-                                export_data.LUASENSE[state][team][section_name] = {}
-                                for k, ctrl in pairs(section) do
-                                    local ok, val = pcall(ui.get, ctrl)
-                                    if ok and val ~= nil then
-                                        export_data.LUASENSE[state][team][section_name][k] = val
-                                    end
-                                end
-                            end
-                            ::next_section2::
-                        end
-                    end
-                end
-                
-                export_data.LUASENSE.extra = {}
-                for key, container in pairs(menu["anti aimbot"]) do
-                    if key == "submenu" then
-                        local ok, val = pcall(ui.get, container)
-                        export_data.LUASENSE.extra[key] = ok and val or nil
-                    elseif type(container) == "table" then
-                        export_data.LUASENSE.extra[key] = {}
-                        for name, item in pairs(container) do
-                            local ok, val = pcall(ui.get, item)
-                            if ok and val ~= nil then
-                                export_data.LUASENSE.extra[key][name] = val
-                            end
-                        end
-                    end
-                end
-                
-                local upload_data = {
-                    name = cfg_name,
-                    author = ui.get(menu["visuals & misc"]["visuals"]["useridls"]) or "Anonymous",
-                    timestamp = client.system_time(),
-                    data = export_data
-                }
-                
-                local ok, json_str = pcall(json.stringify, upload_data)
-                if not ok then
-                    push_notify("Failed to encode config")
-                    return
-                end
-                
-                local ok2, compressed = pcall(base64.encode, json_str)
-                if not ok2 then
-                    push_notify("Failed to compress config")
-                    return
-                end
-                
-                local paste_data = string.format(
-                    "api_dev_key=%s&api_option=paste&api_paste_code=%s&api_paste_private=1&api_paste_name=%s&api_paste_expire_date=N",
-                    "fuaQwIZiKNi2mA6D3fxsTPyX40Wgt7eh",
-                    compressed:gsub("([^%w])", function(c) return string.format("%%%02X", string.byte(c)) end),
-                    ("LuaSense - " .. cfg_name):gsub("([^%w])", function(c) return string.format("%%%02X", string.byte(c)) end)
-                )
-                
-                http.post("https://pastebin.com/api/api_post.php", {
-                    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
-                    body = paste_data
-                }, function(success, response)
-                    if not success or response.status ~= 200 then
-                        push_notify("Upload failed: " .. (response and tostring(response.status) or "Network error"))
-                        return
-                    end
-                    
-                    local paste_url = response.body
-                    local paste_id = paste_url:match("pastebin%.com/(%w+)$")
-                    
-                    if not paste_id then
-                        push_notify("Failed to get paste ID")
-                        return
-                    end
-                    
-                    clipboard.export(paste_id)
-                    push_notify("Uploaded! Code: " .. paste_id .. " (copied)")
-                    
-                    local cloud_configs = localdb.cloud_configs or {}
-                    table.insert(cloud_configs, {
-                        id = paste_id,
-                        name = cfg_name,
-                        author = upload_data.author,
-                        timestamp = upload_data.timestamp
-                    })
-                    localdb.cloud_configs = cloud_configs
-                    
-                    local items = {}
-                    for i, v in ipairs(cloud_configs) do
-                        table.insert(items, string.format("[%s] %s", v.name, v.author))
-                    end
-                    ui.update(menu["config"]["cloudlist"], items)
-                end)
-            end),
-            
-            download_cloud = ui.new_button("aa", "anti-aimbot angles", "\a89f596FF download from cloud", function()
-                local paste_id = ui.get(menu["config"]["cloud_code_input"])
-                if not paste_id or paste_id == "" then
-                    push_notify("Please enter a paste code")
-                    return
-                end
-                
-                http.get("https://pastebin.com/raw/" .. paste_id, function(success, response)
-                    if not success or response.status ~= 200 then
-                        push_notify("Download failed: " .. (response and tostring(response.status) or "Network error"))
-                        return
-                    end
-                    
-                    local ok, json_str = pcall(base64.decode, response.body)
-                    if not ok then
-                        push_notify("Failed to decompress")
-                        return
-                    end
-                    
-                    local ok2, config_data = pcall(json.parse, json_str)
-                    if not ok2 or type(config_data) ~= "table" or not config_data.data then
-                        push_notify("Invalid config format")
-                        return
-                    end
-                    
-                    local cfg = config_data.data.LUASENSE
-                    if cfg.extra then
-                        for section, items in pairs(cfg.extra) do
-                            if section == "submenu" then
-                                pcall(ui.set, menu["anti aimbot"][section], items)
-                            elseif type(items) == "table" then
-                                for name, value in pairs(items) do
-                                    if menu["anti aimbot"][section] and menu["anti aimbot"][section][name] then
-                                        pcall(function()
-                                            if type(value) == "table" then
-                                                ui.set(menu["anti aimbot"][section][name], unpack(value))
-                                            else
-                                                ui.set(menu["anti aimbot"][section][name], value)
-                                            end
-                                        end)
-                                    end
-                                end
-                            end
-                        end
-                    end
-                    
-                    for state, teams in pairs(cfg) do
-                        if state == "extra" then goto skip_state2 end
-                        if not aa[state] then goto skip_state2 end
-                        for team, sections in pairs(teams or {}) do
-                            if not aa[state][team] then goto skip_team2 end
-                            for section_name, section in pairs(sections or {}) do
-                                if section_name == "type" then
-                                    pcall(ui.set, aa[state][team].type, section)
-                                elseif type(section) == "table" and aa[state][team][section_name] then
-                                    for k, v in pairs(section) do
-                                        local ctrl = aa[state][team][section_name][k]
-                                        if ctrl then
-                                            pcall(function()
-                                                if type(v) == "table" then
-                                                    ui.set(ctrl, unpack(v))
-                                                else
-                                                    ui.set(ctrl, v)
-                                                end
-                                            end)
-                                        end
-                                    end
-                                end
-                            end
-                            ::skip_team2::
-                        end
-                        ::skip_state2::
-                    end
-                    
-                    push_notify("Config loaded from cloud!")
-                end)
-            end),
-            
-            config_selector = ui.new_combobox("aa", "anti-aimbot angles", prefix("select config"), {"meta", "aggressive delayed jitter", "safe delayed jitter", "aggressive jitter", "safe jitter", "perfect jitter", "perfect delay jitter"}),
-            load = ui.new_button("aa", "anti-aimbot angles", "\ac8c8c8FF load", function()
-                local selected_config = ui.get(menu["config"]["config_selector"])
-                local check, message = pcall(function()
-                    local tbl
-                    if selected_config == "aggressive delayed jitter" then
-                        tbl = json.parse([[{"LUASENSE":{"duck moving":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-37,"left":37,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":5},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-37,"left":37,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":5},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"extra":{"builder":{"builder":"duck moving","team":"t"},"submenu":"builder","features":{"backstab":"off","legit":"off","roll":0,"fix":{},"defensive":"off","distance":250,"fixer":"default","states":{}},"keybinds":{"type_freestand":"static","type_manual":"static","keys":["manual","freestand"],"disablers":{}}},"slow motion":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"air duck":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-32,"left":33,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":4},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-32,"left":33,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":4},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"fake lag":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"air":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"global":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-33,"left":31,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":7},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-33,"left":31,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":7},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"duck":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-37,"left":37,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":5},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-37,"left":37,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":5},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"hide shot":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"moving":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-24,"left":38,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":5},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-24,"left":38,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":5},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"standing":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}}}}
-]])
-                    elseif selected_config == "safe delayed jitter" then
-                         tbl = json.parse([[{"LUASENSE":{"duck moving":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"extra":{"builder":{"builder":"global","team":"t"},"submenu":"builder","features":{"backstab":"off","legit":"off","roll":0,"fix":{},"defensive":"off","distance":250,"fixer":"default","states":{}},"keybinds":{"type_freestand":"static","type_manual":"static","keys":["manual","freestand"],"disablers":{}}},"slow motion":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"air duck":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"fake lag":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"air":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"jitter","defensive":"always on","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"jitter","defensive":"always on","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"global":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":-30,"left":30,"trigger":"b: best","defensive":"luasense"},"type":"auto","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":-17,"method":"luasense","left":38,"defensive":"luasense","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":-30,"left":30,"trigger":"b: best","defensive":"luasense"},"type":"auto","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":-17,"method":"luasense","left":38,"defensive":"luasense","timer":50,"antibf":"no"}}},"duck":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"hide shot":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"moving":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"standing":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}}}}]])
-                    elseif selected_config == "aggressive jitter" then
-                        tbl = json.parse([[{"LUASENSE":{"duck moving":{"t":{"normal":{"right":-1,"jitter_slider":49,"yaw":9,"method":"default","left":5,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["yaw"],"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":-1,"jitter_slider":49,"yaw":9,"method":"default","left":5,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["yaw"],"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"extra":{"builder":{"builder":"moving","team":"t"},"submenu":"keybinds","features":{"backstab":"off","legit":"off","roll":0,"fix":{},"defensive":"off","distance":250,"fixer":"default","states":{}},"keybinds":{"type_freestand":"jitter","type_manual":"default","keys":["manual","freestand"],"disablers":{}}},"slow motion":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"always on","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"auto","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"always on","timer":150,"antibf":"yes"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"always on","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"auto","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"always on","timer":150,"antibf":"yes"}}},"air duck":{"t":{"normal":{"right":13,"jitter_slider":51,"yaw":0,"method":"default","left":-7,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"always on","mode":{},"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":13,"jitter_slider":51,"yaw":0,"method":"default","left":-7,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"always on","mode":{},"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"fake lag":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"air":{"t":{"normal":{"right":-1,"jitter_slider":60,"yaw":0,"method":"default","left":7,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"always on","mode":{},"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":-1,"jitter_slider":60,"yaw":0,"method":"default","left":7,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"always on","mode":{},"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"global":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"duck":{"t":{"normal":{"right":38,"jitter_slider":74,"yaw":0,"method":"default","left":-22,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"always on","mode":["yaw"],"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":38,"jitter_slider":74,"yaw":0,"method":"default","left":-22,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"always on","mode":["yaw"],"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"hide shot":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"moving":{"t":{"normal":{"right":-7,"jitter_slider":68,"yaw":0,"method":"luasense","left":5,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"luasense","mode":{},"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":-7,"jitter_slider":68,"yaw":0,"method":"luasense","left":5,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"luasense","mode":{},"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"standing":{"t":{"normal":{"right":-5,"jitter_slider":57,"yaw":-3,"method":"luasense","left":-11,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["yaw"],"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":-3,"left":22,"fake":60,"yaw":0,"defensive":"always on","mode":["yaw"],"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"always on","timer":150,"antibf":"yes"}},"ct":{"normal":{"right":-5,"jitter_slider":57,"yaw":-3,"method":"luasense","left":-11,"jitter":"center","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["yaw"],"body_slider":-180},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":-3,"left":22,"fake":60,"yaw":0,"defensive":"always on","mode":["yaw"],"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"always on","timer":150,"antibf":"yes"}}}}}
-]])
-                    elseif selected_config == "safe jitter" then
-                         tbl = json.parse([[{"LUASENSE":{"duck moving":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"extra":{"builder":{"builder":"air","team":"ct"},"submenu":"builder","features":{"backstab":"forward","legit":"off","roll":0,"fix":{},"defensive":"off","distance":300,"fixer":"default","states":{}},"keybinds":{"type_freestand":"jitter","type_manual":"static","keys":["manual","freestand"],"disablers":{}}},"slow motion":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"air duck":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"fake lag":{"t":{"normal":{"right":-22,"jitter_slider":0,"yaw":0,"method":"luasense","left":19,"jitter":"skitter","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["left right"],"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":-22,"jitter_slider":0,"yaw":0,"method":"luasense","left":19,"jitter":"skitter","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["left right"],"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"air":{"t":{"normal":{"right":1,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"jitter","defensive":"always on","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":1,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"jitter","defensive":"always on","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"global":{"t":{"normal":{"right":-21,"jitter_slider":180,"yaw":0,"method":"luasense","left":39,"jitter":"off","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["left right"],"body_slider":-1},"advanced":{"right":-30,"left":30,"trigger":"b: best","defensive":"luasense"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":-17,"method":"luasense","left":38,"defensive":"luasense","timer":50,"antibf":"no"}},"ct":{"normal":{"right":-24,"jitter_slider":180,"yaw":0,"method":"luasense","left":41,"jitter":"off","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["left right"],"body_slider":-1},"advanced":{"right":-30,"left":30,"trigger":"b: best","defensive":"luasense"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":-17,"method":"luasense","left":38,"defensive":"luasense","timer":50,"antibf":"no"}}},"duck":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"hide shot":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"moving":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"standing":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}}}}]])
-                    elseif selected_config == "perfect jitter" then
-                        tbl = json.parse([[{"LUASENSE":{"duck moving":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"extra":{"builder":{"builder":"global","team":"t"},"submenu":"builder","features":{"backstab":"forward","legit":"default","roll":0,"fix":{},"defensive":"off","distance":300,"fixer":"default","states":{}},"keybinds":{"type_freestand":"jitter","type_manual":"static","keys":["manual","freestand"],"disablers":{}}},"slow motion":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"air duck":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"fake lag":{"t":{"normal":{"right":-22,"jitter_slider":0,"yaw":0,"method":"luasense","left":19,"jitter":"skitter","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["left right"],"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":-22,"jitter_slider":0,"yaw":0,"method":"luasense","left":19,"jitter":"skitter","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["left right"],"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"air":{"t":{"normal":{"right":-3,"jitter_slider":0,"yaw":0,"method":"default","left":18,"jitter":"off","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["left right"],"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":-3,"jitter_slider":0,"yaw":0,"method":"default","left":18,"jitter":"off","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["left right"],"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"global":{"t":{"normal":{"right":-21,"jitter_slider":180,"yaw":0,"method":"luasense","left":39,"jitter":"off","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["left right"],"body_slider":-1},"advanced":{"right":-30,"left":30,"trigger":"b: best","defensive":"luasense"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":-17,"method":"luasense","left":38,"defensive":"luasense","timer":50,"antibf":"no"}},"ct":{"normal":{"right":-21,"jitter_slider":180,"yaw":0,"method":"luasense","left":39,"jitter":"off","custom_slider":60,"body":"jitter","defensive":"luasense","mode":["left right"],"body_slider":-1},"advanced":{"right":-30,"left":30,"trigger":"b: best","defensive":"luasense"},"type":"normal","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":-17,"method":"luasense","left":38,"defensive":"luasense","timer":50,"antibf":"no"}}},"duck":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"hide shot":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"moving":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}},"standing":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":50,"antibf":"no"}}}}}]])
-                    elseif selected_config == "perfect delay jitter" then
-                        tbl = json.parse([[{"LUASENSE":{"duck moving":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-37,"left":37,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":3},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-37,"left":37,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":3},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"extra":{"builder":{"builder":"duck moving","team":"t"},"submenu":"keybinds","features":{"backstab":"forward","legit":"off","roll":0,"fix":{},"defensive":"off","distance":300,"fixer":"default","states":{}},"keybinds":{"type_freestand":"jitter","type_manual":"static","keys":["manual","freestand"],"disablers":["manual"]}},"slow motion":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"air duck":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-17,"left":49,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":4},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-17,"left":49,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":4},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"fake lag":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"air":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"global":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-29,"left":25,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":5},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-29,"left":25,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":5},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"duck":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-37,"left":37,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":3},"disabled":{},"auto":{"right":-37,"method":"luasense","left":37,"defensive":"luasense","timer":150,"antibf":"yes"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-37,"left":37,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":3},"disabled":{},"auto":{"right":-37,"method":"luasense","left":37,"defensive":"luasense","timer":150,"antibf":"yes"}}},"hide shot":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"moving":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-28,"left":38,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":3},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"luasense","luasense":{"right":-28,"left":38,"fake":60,"yaw":0,"defensive":"luasense","mode":["left right"],"luasense":3},"disabled":{},"auto":{"right":0,"method":"simple","left":0,"defensive":"off","timer":150,"antibf":"no"}}},"standing":{"t":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":-19,"method":"luasense","left":47,"defensive":"luasense","timer":150,"antibf":"yes"}},"ct":{"normal":{"right":0,"jitter_slider":0,"yaw":0,"method":"default","left":0,"jitter":"off","custom_slider":60,"body":"off","defensive":"off","mode":{},"body_slider":0},"advanced":{"right":0,"left":0,"trigger":"a: brandon","defensive":"off"},"type":"disabled","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"off","mode":{},"luasense":1},"disabled":{},"auto":{"right":-19,"method":"luasense","left":47,"defensive":"luasense","timer":150,"antibf":"yes"}}}}}]])
-                    elseif selected_config == "meta" then
-
-                        tbl = json.parse([[
-                        {"LUASENSE":{
-                           "global":{"t":{"normal":{"right":-10,"left":10,"yaw":0,"method":"luasense","jitter":"random","jitter_slider":10,"custom_slider":55,"body":"luasense","defensive":"luasense","body_slider":-120},"advanced":{},"type":"luasense","luasense":{"right":-20,"left":20,"fake":58,"yaw":0,"defensive":"luasense","luasense":4},"auto":{"right":-10,"left":10,"method":"luasense","timer":100,"antibf":"yes"}}}},
-                           "standing":{"t":{"normal":{"right":-12,"left":12,"yaw":0,"method":"luasense","jitter":"center","jitter_slider":8,"custom_slider":50,"body":"luasense","defensive":"luasense","body_slider":-120},"type":"luasense","luasense":{"right":-25,"left":25,"fake":56,"yaw":0,"defensive":"luasense","luasense":4},"auto":{"right":-20,"left":24,"method":"luasense","timer":90,"antibf":"yes","enablerand":true,"randomization":30,"auto_rand":true}}},
-                           "moving":{"t":{"normal":{"right":-8,"left":14,"yaw":0,"method":"luasense","jitter":"skitter","jitter_slider":6,"custom_slider":52,"body":"luasense","defensive":"luasense","body_slider":-110},"type":"luasense","luasense":{"right":-18,"left":18,"fake":56,"yaw":0,"defensive":"luasense","luasense":3},"auto":{"right":-12,"left":12,"method":"luasense","timer":80,"antibf":"yes","enablerand":true,"randomization":22,"auto_rand":true}}},
-                           "air":{"t":{"normal":{"right":0,"left":0,"yaw":0,"method":"luasense","jitter":"off","custom_slider":60,"body":"luasense","defensive":"always on","body_slider":-100},"type":"luasense","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"always on","luasense":1},"auto":{"right":0,"left":0,"method":"luasense","timer":60,"antibf":"no","enablerand":true,"randomization":45,"auto_rand":true}}},
-                           "air duck":{"t":{"normal":{"right":0,"left":0,"yaw":0,"method":"luasense","jitter":"off","custom_slider":60,"body":"static","defensive":"always on","body_slider":0},"type":"luasense","luasense":{"right":0,"left":0,"fake":60,"yaw":0,"defensive":"always on","luasense":2},"auto":{"right":0,"left":0,"method":"luasense","timer":60,"antibf":"no","enablerand":true,"randomization":45,"auto_rand":true}}},
-                           "duck":{"t":{"normal":{"right":10,"left":-10,"yaw":0,"method":"luasense","jitter":"center","jitter_slider":6,"custom_slider":58,"body":"luasense","defensive":"luasense","body_slider":-130},"type":"luasense","luasense":{"right":12,"left":-12,"fake":56,"yaw":0,"defensive":"luasense","luasense":3},"auto":{"right":10,"left":-10,"method":"luasense","timer":90,"antibf":"yes","enablerand":true,"randomization":24,"auto_rand":true}}},
-                           "fake lag":{"t":{"normal":{"right":0,"left":0,"yaw":0,"method":"default","fake":14}}}
-                        }}]])
-                    end
-                    for i, v in next, tbl["LUASENSE"]["extra"] do
-                        if i == "submenu" then
-                            ui.set(menu["anti aimbot"][i], v)
-                        else
-                            for index, value in next, v do
-                                ui.set(menu["anti aimbot"][i][index], value)
-                            end
-                        end
-                    end
-                    tbl["LUASENSE"]["extra"] = nil
-                    for i, v in next, tbl["LUASENSE"] do
-                        for index, value in next, v do
-                            for ii, vv in next, value do
-                                if ii == "type" then
-                                    ui.set(aa[i][index][ii], vv)
-                                else
-                                    for iii, vvv in next, vv do
-                                        ui.set(aa[i][index][ii][iii], vvv)
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end)
-                push_notify(check and "Config " .. selected_config .. " loaded!  " or "Error while loading config " .. selected_config .. "!  ")
-            end),
-            export = ui.new_button("aa", "anti-aimbot angles", "\a89f596FF export", function()
-                local export_table = { LUASENSE = {} }
-                local errs = {}
-                
-                local function safe_get(item)
-                    local ok, val = pcall(ui.get, item)
-                    if not ok then return nil end
-                    return val
-                end
-                
-                for state, teams in pairs(aa) do
-                    export_table.LUASENSE[state] = export_table.LUASENSE[state] or {}
-                    for team, block in pairs(teams) do
-                        export_table.LUASENSE[state][team] = export_table.LUASENSE[state][team] or {}
-                        for section_name, section in pairs(block) do
-                            if section_name == "button" then goto continue_section end
-                            export_table.LUASENSE[state][team][section_name] = export_table.LUASENSE[state][team][section_name] or {}
-                            if type(section) ~= "table" then goto continue_section end
-                            for k, ctrl in pairs(section) do
-                                if type(ctrl) ~= "table" and (section_name == "type") then
-                                    
-                                    export_table.LUASENSE[state][team][section_name] = safe_get(ctrl)
-                                else
-                                    
-                                    if type(ctrl) == "table" then
-                                        local ok, sample = pcall(function() return ui.get(ctrl) end)
-                                        if ok and sample ~= nil then
-                                            export_table.LUASENSE[state][team][section_name][k] = safe_get(ctrl)
-                                        elseif type(ctrl) == "table" then
-                                            
-                                            export_table.LUASENSE[state][team][section_name][k] = export_table.LUASENSE[state][team][section_name][k] or {}
-                                            for k2, c2 in pairs(ctrl) do
-                                                if type(c2) == "table" then
-                                                    export_table.LUASENSE[state][team][section_name][k][k2] = safe_get(c2)
-                                                end
-                                            end
-                                        end
-                                    else
-                                        
-                                    end
-                                end
-                            end
-                            ::continue_section::
-                        end
-                    end
-                end
-
-                
-                export_table.LUASENSE.extra = export_table.LUASENSE.extra or {}
-                for key, container in pairs(menu["anti aimbot"]) do
-                    if key == "submenu" then
-                        export_table.LUASENSE.extra[key] = safe_get(container)
-                    else
-                        export_table.LUASENSE.extra[key] = export_table.LUASENSE.extra[key] or {}
-                        for name, item in pairs(container) do
-                            
-                            if type(item) == "table" then
-                                local ok, sample = pcall(ui.get, item)
-                                if ok and sample ~= nil then
-                                    
-                                    export_table.LUASENSE.extra[key][name] = safe_get(item)
-                                end
-                            end
-                        end
-                    end
-                end
-
-                
-                local ok, out = pcall(json.stringify, export_table)
-                if not ok then
-                    push_notify("Export failed: json stringify error")
-                    return
-                end
-                clipboard.export(out)
-                push_notify("Exported config to clipboard")
-            end),
-            import = ui.new_button("aa", "anti-aimbot angles", "\a32a852FF import", function()
-                local clip = nil
-                local ok, raw = pcall(clipboard.import)
-                if not ok or type(raw) ~= "string" then
-                    push_notify("Import failed: clipboard empty or inaccessible")
-                    return
-                end
-
-                local ok_parse, parsed = pcall(json.parse, raw)
-                if not ok_parse or type(parsed) ~= "table" or type(parsed.LUASENSE) ~= "table" then
-                    push_notify("Import failed: invalid format")
-                    return
-                end
-
-                local cfg = parsed.LUASENSE
-                local errs = {}
-
-                
-                if cfg.extra and type(cfg.extra) == "table" then
-                    for section, items in pairs(cfg.extra) do
-                        if section == "submenu" then
-                            pcall(ui.set, menu["anti aimbot"][section], items)
-                        else
-                            for name, value in pairs(items or {}) do
-                                if menu["anti aimbot"][section] and menu["anti aimbot"][section][name] then
-                                    local okset = pcall(function()
-                                        if type(value) == "table" then
-                                            ui.set(menu["anti aimbot"][section][name], unpack(value))
-                                        else
-                                            ui.set(menu["anti aimbot"][section][name], value)
-                                        end
-                                    end)
-                                    if not okset then table.insert(errs, ("failed set extra %s.%s"):format(section, name)) end
-                                end
-                            end
-                        end
-                    end
-                end
-
-                
-                for state, teams in pairs(cfg) do
-                    if state == "extra" then goto continue_state end
-                    if not aa[state] then table.insert(errs, ("unknown state %s"):format(state)); goto continue_state end
-                    for team, sections in pairs(teams or {}) do
-                        if not aa[state][team] then table.insert(errs, ("unknown team %s.%s"):format(state, team)); goto continue_team end
-                        for section_name, section in pairs(sections or {}) do
-                            if section_name == "type" then
-                                pcall(ui.set, aa[state][team].type, section)
-                            else
-                                if type(section) == "table" and aa[state][team][section_name] then
-                                    for k, v in pairs(section) do
-                                        local ctrl = aa[state][team][section_name][k]
-                                        if ctrl ~= nil then
-                                            local okset = pcall(function()
-                                                if type(v) == "table" then ui.set(ctrl, unpack(v)) else ui.set(ctrl, v) end
-                                            end)
-                                            if not okset then table.insert(errs, ("failed set %s.%s.%s"):format(state, team, section_name)) end
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                        ::continue_team::
-                    end
-                    ::continue_state::
-                end
-
-                if #errs == 0 then
-                    push_notify("Imported config!")
-                else
-                    push_notify("Imported with warnings: " .. table.concat(errs, ", "))
-                end
             end),
         }
     }
