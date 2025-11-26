@@ -2293,25 +2293,53 @@ return (function(tbl)
     
 
     local function save_antibf()
-        pcall(database.write, ANTIBF_DB_KEY, {
-            log = tbl.antiaim.log,
-            ab = {
-                method = tbl.antiaim.ab.method,
-                locked = tbl.antiaim.ab.locked,
-                time = tbl.antiaim.ab.time
+        local ok, err = pcall(function()
+            local data_to_save = {
+                log = tbl.antiaim.log or {},
+                ab = {
+                    method = tbl.antiaim.ab.method or {},
+                    locked = tbl.antiaim.ab.locked or {},
+                    time = tbl.antiaim.ab.time or {}
+                }
             }
-        })
+            
+            -- Try database.write first
+            local db_ok = pcall(database.write, ANTIBF_DB_KEY, data_to_save)
+            if not db_ok then
+                -- Fallback to localdb if database.write fails
+                localdb.antibf_data = data_to_save
+            end
+        end)
+        
+        if not ok then
+            client.error_log("Failed to save anti-bruteforce data: " .. tostring(err))
+        end
     end
 
     local function load_antibf()
-        local ok, data = pcall(database.read, ANTIBF_DB_KEY)
-        if not ok or type(data) ~= "table" then return end
+        local ok, err = pcall(function()
+            -- Try database.read first
+            local db_ok, data = pcall(database.read, ANTIBF_DB_KEY)
+            
+            if not db_ok or type(data) ~= "table" then
+                -- Fallback to localdb
+                data = localdb.antibf_data
+            end
+            
+            if type(data) == "table" then
+                if type(data.log) == "table" then 
+                    tbl.antiaim.log = data.log 
+                end
+                if type(data.ab) == "table" then
+                    tbl.antiaim.ab.method = data.ab.method or {}
+                    tbl.antiaim.ab.locked = data.ab.locked or {}
+                    tbl.antiaim.ab.time = data.ab.time or {}
+                end
+            end
+        end)
         
-        if type(data.log) == "table" then tbl.antiaim.log = data.log end
-        if type(data.ab) == "table" then
-            tbl.antiaim.ab.method = data.ab.method or {}
-            tbl.antiaim.ab.locked = data.ab.locked or {}
-            tbl.antiaim.ab.time = data.ab.time or {}
+        if not ok then
+            client.error_log("Failed to load anti-bruteforce data: " .. tostring(err))
         end
     end
 
@@ -2320,7 +2348,7 @@ return (function(tbl)
         local ttl = AB_CONFIG.persist_ttl
         local max = AB_CONFIG.max_entries
         
-        
+        -- Prune old entries
         for key, entry in pairs(tbl.antiaim.log) do
             if type(entry) == "table" and not entry.locked then
                 if (entry.last or 0) > 0 and (now - entry.last) > ttl then
@@ -2333,7 +2361,7 @@ return (function(tbl)
             end
         end
         
-        
+        -- Count total entries
         local total = 0
         for _ in pairs(tbl.antiaim.log) do total = total + 1 end
         
@@ -2367,9 +2395,42 @@ return (function(tbl)
 
     local function antibf_reset()
         tbl.antiaim.log = {}
-        tbl.antiaim.ab = { time = {}, method = {}, hit_count = {}, last_hit = {}, adjustments = {}, locked = {} }
+        tbl.antiaim.ab = { 
+            time = {}, 
+            method = {}, 
+            hit_count = {}, 
+            last_hit = {}, 
+            adjustments = {}, 
+            locked = {} 
+        }
         save_antibf()
     end
+
+
+    -- Load on script start
+    load_antibf()
+
+    -- Periodic maintenance (every 60 seconds)
+    local last_maint = 0
+    client.set_event_callback("paint", function()
+        local now = globals.realtime()
+        if now - last_maint >= 60 then
+            prune_antibf(now)
+            save_antibf()
+            last_maint = now
+        end
+    end)
+
+    -- Save on shutdown
+    client.set_event_callback("shutdown", function()
+        save_antibf()
+    end)
+
+    -- Export functions globally
+    tbl.antiaim.ab_apply = apply_antibf_adjustments
+    tbl.antiaim.ab_reset = antibf_reset
+    tbl.antiaim.ab_save = save_antibf
+    tbl.antiaim.ab_load = load_antibf
 
     local tickshot = 0
 
@@ -3918,7 +3979,7 @@ end
 
                 if jitter_type ~= "off" then
                     local jitter_result = 0
-                    
+
                         if jitter_type == "luasense" then   
                         
                         local counter = (tbl.antiaim.counter or 0)
