@@ -1009,13 +1009,6 @@ return (function(tbl)
                 end)
                 push_notify(check and "Config " .. selected_config .. " loaded!  " or "Error while loading config " .. selected_config .. "!  ")
             end),
-            notify = ui.new_button("aa", "anti-aimbot angles", "\a96C845FFexample notification", function()
-                local r, g, b = ui.get(menu["visuals & misc"]["visuals"]["notcolor"])
-                local a = 255
-                local white = "\aFFFFFFFF"
-                local colored_notification = ("\a%02x%02x%02x%02x%s"):format(r, g, b, a, "notification")
-                push_notify(white .. "Example " .. colored_notification .. white .. "!  ")
-            end),
             export = ui.new_button("aa", "anti-aimbot angles", "\a89f596FF export", function()
                 local export_table = { LUASENSE = {} }
                 local errs = {}
@@ -1215,7 +1208,7 @@ return (function(tbl)
                     timer = ui.new_slider("aa", "anti-aimbot angles", "\ntimer", 50, 1000, 150, true, "ms"),
                     left = ui.new_slider("aa", "anti-aimbot angles", prefix(v .. " " .. value, "left\n\n\n"), -180, 180, 0),
                     right = ui.new_slider("aa", "anti-aimbot angles", prefix(v .. " " .. value, "right\n\n\n"), -180, 180, 0),
-                    jitter1 = ui.new_combobox("aa", "anti-aimbot angles", prefix(v .. " " .. value, "jitter"), {"off", "offset", "center", "random", "skitter", "luasense"}),
+                    jitter1 = ui.new_combobox("aa", "anti-aimbot angles", prefix(v .. " " .. value, "jitter"), {"off", "luasense"}),
                     jitter_slider1 = ui.new_slider("aa", "anti-aimbot angles", "\njitter slider " .. v .. " " .. value, -180, 180, 0),
                     enablerand = ui.new_checkbox("aa", "anti-aimbot angles", prefix(v .. " " .. value, "enable yaw randomization")),
                     randomization = ui.new_slider("aa", "anti-aimbot angles", prefix(v .. " " .. value, "randomization"), 0, 100, 0, true, "%"),
@@ -3926,27 +3919,7 @@ end
                 if jitter_type ~= "off" then
                     local jitter_result = 0
                     
-                    if jitter_type == "offset" then
-                        
-                        jitter_result = arg.chokedcommands == 0 and jitter_value or -jitter_value
-                        
-                    elseif jitter_type == "center" then
-                        
-                        jitter_result = arg.chokedcommands == 0 and jitter_value / 2 or -jitter_value / 2
-                        
-                    elseif jitter_type == "random" then
-                        
-                        jitter_result = client.random_int(-math.abs(jitter_value), math.abs(jitter_value))
-                        
-                    elseif jitter_type == "skitter" then
-                        
-                        local micro = client.random_int(-8, 8)
-                        local macro = arg.command_number % 4 < 2 and jitter_value or -jitter_value
-                        jitter_result = macro + micro
-                        
-                    elseif jitter_type == "luasense" then
-                        
-                        
+                        if jitter_type == "luasense" then   
                         
                         local counter = (tbl.antiaim.counter or 0)
                         
