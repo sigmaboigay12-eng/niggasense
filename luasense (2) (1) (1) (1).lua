@@ -587,7 +587,7 @@ local notify = (function()
         local prefix_height = f(prefix_font, prefix_text).y
         local separator_width = f(prefix_font, separator_text).x
         local separator_height_text = f("b", separator_text).y
-        local is_centered = ui.get(menu["visuals & misc"]["visuals"]["notmark_centered"])
+        local is_centered = true
         local marker_offset = is_centered and 0 or ui.get(menu["visuals & misc"]["visuals"]["notmarkoffset"])
         local marker_x_offset = is_centered and 0 or ui.get(menu["visuals & misc"]["visuals"]["notmarkxoffset"])
         local q = m + text_size.x + (prefix_text ~= "" and prefix_width + separator_width + marker_offset or 0) + 2
