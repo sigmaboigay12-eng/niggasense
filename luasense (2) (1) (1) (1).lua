@@ -1816,8 +1816,6 @@ end)
                     timer = ui.new_slider("aa", "anti-aimbot angles", "\ntimer", 50, 1000, 150, true, "ms"),
                     left = ui.new_slider("aa", "anti-aimbot angles", prefix(v .. " " .. value, "left\n\n\n"), -180, 180, 0),
                     right = ui.new_slider("aa", "anti-aimbot angles", prefix(v .. " " .. value, "right\n\n\n"), -180, 180, 0),
-                    jitter1 = ui.new_combobox("aa", "anti-aimbot angles", prefix(v .. " " .. value, "jitter"), {"off", "luasense"}),
-                    jitter_slider1 = ui.new_slider("aa", "anti-aimbot angles", "\njitter slider " .. v .. " " .. value, -180, 180, 0),
                     enablerand = ui.new_checkbox("aa", "anti-aimbot angles", prefix(v .. " " .. value, "enable yaw randomization")),
                     randomization = ui.new_slider("aa", "anti-aimbot angles", prefix(v .. " " .. value, "randomization"), 0, 100, 0, true, "%"),
                     delay_mode = ui.new_combobox("aa", "anti-aimbot angles", prefix(v .. " " .. value, "delay mode\n"), {"fixed", "random", "min/max", "exponential", "experimental"}),
@@ -4568,82 +4566,6 @@ end
                         end                       
 					end
                 end
-                local jitter_type = ui.get(menutbl["jitter1"]) or "off"
-                local jitter_value = ui.get(menutbl["jitter_slider1"]) or 0
-
-                local jitter_type = ui.get(menutbl["jitter1"]) or "off"
-                local jitter_value = ui.get(menutbl["jitter_slider1"]) or 0
-
-                if jitter_type == "luasense" and jitter_value ~= 0 then
-                    
-                    if not tbl.antiaim.jitter_counter then
-                        tbl.antiaim.jitter_counter = 0
-                    end
-                    
-                    
-                    local patterns = {
-                        
-                        function(base, tick)
-                            local side = (tick % 2 == 0) and 1 or -1
-                            local micro = client.random_int(-5, 5)
-                            return base * side + micro
-                        end,
-                        
-                        
-                        function(base, tick)
-                            local phase = tick % 3
-                            if phase == 0 then return base
-                            elseif phase == 1 then return -base
-                            else return client.random_int(-base, base) end
-                        end,
-                        
-                        
-                        function(base, tick)
-                            return client.random_int(-math.abs(base), math.abs(base))
-                        end,
-                        
-                        
-                        function(base, tick)
-                            local decay = 1 - ((tick % 8) / 8)
-                            local side = (tick % 2 == 0) and 1 or -1
-                            return math.floor(base * decay * side)
-                        end
-                    }
-                    
-                    
-                    local pattern_change_rate = client.random_int(4, 7)
-                    if tbl.antiaim.jitter_counter % pattern_change_rate == 0 then
-                        tbl.antiaim.jitter_pattern = client.random_int(1, #patterns)
-                    end
-                    
-                    
-                    local current_pattern = patterns[tbl.antiaim.jitter_pattern or 1]
-                    
-                    
-                    local jitter_amount = current_pattern(jitter_value, tbl.antiaim.jitter_counter)
-                    
-                    
-                    jitter_amount = math.max(-180, math.min(180, math.floor(jitter_amount)))
-                    
-                    
-                    local current_yaw = ui.get(tbl.items.yaw[2]) or 0
-                    ui.set(tbl.items.yaw[2], tbl.clamp(current_yaw + jitter_amount))
-                    
-                    
-                    ui.set(tbl.items.jitter[1], "off")
-                    ui.set(tbl.items.jitter[2], 0)
-                    
-                    
-                    if arg.chokedcommands == 0 then
-                        tbl.antiaim.jitter_counter = tbl.antiaim.jitter_counter + 1
-                    end
-                else
-                    
-                    ui.set(tbl.items.jitter[1], "off")
-                    ui.set(tbl.items.jitter[2], 0)
-                    tbl.antiaim.jitter_counter = 0
-                    tbl.antiaim.jitter_pattern = nil
-                end
 
                 if ui.get(menutbl["antibf"]) == "yes" and enemy ~= nil then
                     local sid = tostring(entity.get_steam64(enemy) or enemy)
@@ -4873,10 +4795,6 @@ end
                                         fix = ui.get(vv["method"]) == "luasense" and ui.get(vv["delay_mode"]) == "min/max"
                                     elseif iii == "delay_exponentialfunction" or iii == "delay_exponential_min" or iii == "delay_exponential_max" then
                                         fix = ui.get(vv["method"]) == "luasense" and ui.get(vv["delay_mode"]) == "exponential"
-                                    elseif iii == "jitter1" then
-                                        fix = true
-                                    elseif iii == "jitter_slider1" then
-                                        fix = ui.get(vv["jitter1"]) ~= "off"
                                     end
                                 end 
                                 ui.set_visible(vvv, section and selected and current == "anti aimbot" and sub == "builder" and mode == ii and fix)
