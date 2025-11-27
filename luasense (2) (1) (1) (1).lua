@@ -109,7 +109,7 @@ local config_file = {}
 do
     local CONFIG_FILE = ".\\luasense.cfg"
     
-    -- Read entire config file
+    
     local function read_config_file()
         if type(readfile) ~= "function" then return {} end
         local ok, content = pcall(readfile, CONFIG_FILE)
@@ -121,7 +121,7 @@ do
         return data
     end
     
-    -- Write entire config file
+    
     local function write_config_file(data)
         if type(writefile) ~= "function" then return false end
         
@@ -132,21 +132,21 @@ do
         return ok2
     end
     
-    -- Save a config
+    
     function config_file.save(name, config_data)
         if not name or name == "" then return false end
         
         local all_configs = read_config_file()
         local username = js.MyPersonaAPI.GetName()
         
-        -- Get current timestamp
+        
         local timestamp = client.system_time()
         local date_str = js.MyPersonaAPI.GetName()
         
         all_configs[name] = {
             name = name,
             data = config_data,
-            author = username or "user",
+            author = date_str,
             timestamp = timestamp,
             date = date_str
         }
@@ -154,7 +154,7 @@ do
         return write_config_file(all_configs)
     end
     
-    -- Load a config
+    
     function config_file.load(name)
         if not name or name == "" then return nil end
         
@@ -166,7 +166,7 @@ do
         return entry.data, entry
     end
     
-    -- Delete a config
+    
     function config_file.delete(name)
         if not name or name == "" then return false end
         
@@ -176,7 +176,7 @@ do
         return write_config_file(all_configs)
     end
     
-    -- Get list of all config names
+    
     function config_file.list()
         local all_configs = read_config_file()
         local names = {}
@@ -190,7 +190,7 @@ do
             })
         end
         
-        -- Sort by timestamp (newest first)
+        
         table.sort(names, function(a, b)
             return (a.timestamp or 0) > (b.timestamp or 0)
         end)
@@ -198,7 +198,7 @@ do
         return names
     end
     
-    -- Export config to base64 string
+    
     function config_file.export(name)
         local all_configs = read_config_file()
         local entry = all_configs[name]
@@ -214,7 +214,7 @@ do
         return encoded
     end
     
-    -- Import config from base64 string
+    
     function config_file.import(encoded_data)
         local ok, json_str = pcall(base64.decode, encoded_data)
         if not ok then return nil, "Failed to decode" end
@@ -953,9 +953,75 @@ local cloud_system = {
     
     cache_file = ".\\luasense_cloud.cfg",
     username = "",
+    liked_configs = {}
 }
 
--- Helper: Generate unique config ID
+function cloud_system:like_selected(index)
+    if index < 1 or index > #self.configs then
+        push_notify("Invalid config selection")
+        return false
+    end
+    
+    local config = self.configs[index]
+    local config_id = config.id or tostring(index)
+    
+    
+    if not config.liked_by then
+        config.liked_by = {}
+    end
+    
+    
+    local user_key = self.username or username or "Anonymous"
+    if config.liked_by[user_key] then
+        push_notify("You already liked this config!")
+        return false
+    end
+    
+    
+    config.likes = (config.likes or 0) + 1
+    
+    
+    config.liked_by[user_key] = true
+    
+    
+    self:save_cache()
+    self:update_listbox()
+    
+    
+    local ok, json_str = pcall(json.stringify, {configs = self.configs})
+    if not ok then
+        push_notify("Failed to encode data")
+        
+        config.likes = (config.likes or 1) - 1
+        config.liked_by[user_key] = nil
+        return false
+    end
+    
+    http.put(self.api_url, {
+        headers = {
+            ["Content-Type"] = "application/json",
+            ["X-Master-Key"] = self.api_key,
+            ["X-Bin-Meta"] = "false"
+        },
+        body = json_str
+    }, function(success, response)
+        if success and response.status == 200 then
+            push_notify("Liked '" .. config.name .. "'!")
+            self:save_cache()
+        else
+            
+            config.likes = (config.likes or 1) - 1
+            config.liked_by[user_key] = nil
+            self:update_listbox()
+            self:save_cache()
+            push_notify("Failed to like config")
+        end
+    end)
+    
+    return true
+end
+
+
 local function generate_id()
     local chars = "0123456789abcdefghijklmnopqrstuvwxyz"
     local id = ""
@@ -965,14 +1031,14 @@ local function generate_id()
     return id .. "_" .. client.system_time()
 end
 
--- Save cloud cache to file
+
 function cloud_system:save_cache()
     if type(writefile) ~= "function" then
-        -- Fallback to localdb if writefile not available
         localdb.cloud_cache = {
             configs = self.configs,
             last_update = client.system_time(),
-            last_refresh = self.last_refresh
+            last_refresh = self.last_refresh,
+            liked_configs = self.liked_configs
         }
         return
     end
@@ -981,7 +1047,8 @@ function cloud_system:save_cache()
         configs = self.configs,
         last_update = client.system_time(),
         last_refresh = self.last_refresh,
-        username = self.username
+        username = self.username,
+        liked_configs = self.liked_configs
     }
     
     local ok, json_str = pcall(json.stringify, cache_data)
@@ -996,9 +1063,10 @@ function cloud_system:save_cache()
     end
 end
 
--- Load cloud cache from file
+
+
 function cloud_system:load_cache()
-    -- Try file first
+    
     if type(readfile) == "function" then
         local ok, content = pcall(readfile, self.cache_file)
         if ok and content then
@@ -1006,15 +1074,14 @@ function cloud_system:load_cache()
             if ok2 and type(data) == "table" then
                 self.configs = data.configs or {}
                 self.last_refresh = data.last_refresh or 0
+                self.liked_configs = data.liked_configs or {}
                 
-                -- Sort by timestamp
                 table.sort(self.configs, function(a, b)
                     return (a.timestamp or 0) > (b.timestamp or 0)
                 end)
                 
                 self:update_listbox()
                 
-                -- Auto-refresh if cache is old (older than 5 minutes)
                 local age = client.system_time() - (data.last_update or 0)
                 if age > 300 then
                     client.delay_call(2, function()
@@ -1026,11 +1093,12 @@ function cloud_system:load_cache()
         end
     end
     
-    -- Fallback to localdb
+    
     local cache = localdb.cloud_cache
     if type(cache) == "table" then
         self.configs = cache.configs or {}
         self.last_refresh = cache.last_refresh or 0
+        self.liked_configs = cache.liked_configs or {}
         
         table.sort(self.configs, function(a, b)
             return (a.timestamp or 0) > (b.timestamp or 0)
@@ -1047,7 +1115,6 @@ function cloud_system:load_cache()
     end
 end
 
--- Upload config to cloud
 function cloud_system:upload(config_name, config_data)
     if self.loading then
         push_notify("Please wait, cloud is busy...")
@@ -1064,25 +1131,23 @@ function cloud_system:upload(config_name, config_data)
     local upload_entry = {
         id = generate_id(),
         name = config_name,
-        author = username or "Anonymous",
+        author = (self.username or username or "Anonymous"),
         timestamp = client.system_time(),
-        date = 1,
+        date = tostring(client.system_time()),
         downloads = 0,
+        likes = 0,  
+        liked_by = {},
         data = config_data
     }
     
-    -- Add to existing configs
     table.insert(self.configs, upload_entry)
     
-    -- Sort by timestamp
     table.sort(self.configs, function(a, b)
         return (a.timestamp or 0) > (b.timestamp or 0)
     end)
     
-    -- Save to cache immediately
     self:save_cache()
     
-    -- Encode full database
     local ok, json_str = pcall(json.stringify, {configs = self.configs})
     if not ok then
         self.loading = false
@@ -1091,7 +1156,6 @@ function cloud_system:upload(config_name, config_data)
         return false
     end
     
-    -- Upload to JSONBin
     http.put(self.api_url, {
         headers = {
             ["Content-Type"] = "application/json",
@@ -1131,7 +1195,7 @@ function cloud_system:upload(config_name, config_data)
     return true
 end
 
--- Download all configs from cloud
+
 function cloud_system:refresh()
     local now = globals.realtime()
     if now - self.last_refresh < self.refresh_interval then
@@ -1172,8 +1236,14 @@ function cloud_system:refresh()
         end
         
         self.configs = data.record.configs or {}
+
+        for i, cfg in ipairs(self.configs) do
+            if not cfg.liked_by then
+                cfg.liked_by = {}
+            end
+        end
         
-        -- Sort by timestamp (newest first)
+        
         table.sort(self.configs, function(a, b)
             return (a.timestamp or 0) > (b.timestamp or 0)
         end)
@@ -1187,7 +1257,7 @@ function cloud_system:refresh()
     return true
 end
 
--- Load selected config
+
 function cloud_system:load_selected(index)
     if index < 1 or index > #self.configs then
         push_notify("Invalid config selection")
@@ -1206,7 +1276,7 @@ function cloud_system:load_selected(index)
         return false
     end
     
-    -- Apply menu settings
+    
     if cfg.menu then
         for category, items in pairs(cfg.menu) do
             for key, value in pairs(items) do
@@ -1223,7 +1293,7 @@ function cloud_system:load_selected(index)
         end
     end
     
-    -- Apply AA settings
+    
     for state, teams in pairs(cfg) do
         if state == "menu" then goto skip_state end
         if not aa[state] then goto skip_state end
@@ -1252,7 +1322,7 @@ function cloud_system:load_selected(index)
         ::skip_state::
     end
     
-    -- Increment download count
+    
     config.downloads = (config.downloads or 0) + 1
     self:save_cache()
     
@@ -1260,7 +1330,7 @@ function cloud_system:load_selected(index)
     return true
 end
 
--- Delete own config
+
 function cloud_system:delete_selected(index)
     if index < 1 or index > #self.configs then
         push_notify("Invalid config selection")
@@ -1269,19 +1339,19 @@ function cloud_system:delete_selected(index)
     
     local config = self.configs[index]
     
-    -- Check if user owns this config
-    if config.author ~= self.username then
+    local function normalize(s) return tostring(s or ""):gsub("%s+", ""):lower() end
+    if normalize(config.author) ~= normalize(self.username or username) then
         push_notify("You can only delete your own configs!")
         return false
     end
     
     table.remove(self.configs, index)
     
-    -- Save to cache immediately
+    
     self:save_cache()
     self:update_listbox()
     
-    -- Update cloud
+    
     local ok, json_str = pcall(json.stringify, {configs = self.configs})
     if not ok then
         push_notify("Failed to encode data")
@@ -1306,39 +1376,41 @@ function cloud_system:delete_selected(index)
     return true
 end
 
--- Update listbox UI
+
 function cloud_system:update_listbox()
     local items = {}
     for i, cfg in ipairs(self.configs) do
         local date = cfg.date or "Unknown"
         local author = cfg.author or "Unknown"
         local downloads = cfg.downloads or 0
+        local likes = cfg.likes or 0
         local name = cfg.name or "Unnamed"
         
         local is_own = (author == self.username)
-        local prefix = is_own and "[own] " or ""
-        
-        table.insert(items, string.format("%s%s | %s | DL:%d | %s", 
-            prefix, name, author, downloads, date))
+        local prefix = is_own and "⭐ " or ""
+
+        table.insert(items, string.format("%s%s  •  👤 %s  •  ⬇️ %d  •  ✔ %d  •  📅 %s",
+            prefix, name, author, downloads, likes, date))
     end
     
     ui.update(menu["config"]["cloud_list"], items)
 end
 
--- Initialize
+
+
 cloud_system.username = js.MyPersonaAPI.GetName() or "Anonymous"
 
--- Load cache on startup
+
 client.delay_call(0.1, function()
     cloud_system:load_cache()
 end)
 
--- Save cache on shutdown
+
 client.set_event_callback("shutdown", function()
     cloud_system:save_cache()
 end)
 
--- Periodic auto-save (every 30 seconds)
+
 local last_cloud_save = 0
 client.set_event_callback("paint", function()
     local now = globals.realtime()
@@ -1486,7 +1558,7 @@ end)
     
     separator = ui.new_label("aa", "anti-aimbot angles", "\n "),
     
-    -- ===== LOCAL CONFIG SECTION =====
+    
     local_label = ui.new_label("aa", "anti-aimbot angles", prefix("local configs")),
     local_list = ui.new_listbox("aa", "anti-aimbot angles", "\nlocal configs", {}),
     local_name = ui.new_textbox("aa", "anti-aimbot angles", prefix("config name")),
@@ -1498,10 +1570,10 @@ end)
             return
         end
         
-        -- Export current settings
+        
         local export_data = { LUASENSE = {} }
         
-        -- Copy all AA settings
+        
         for state, teams in pairs(aa) do
             export_data.LUASENSE[state] = export_data.LUASENSE[state] or {}
             for team, block in pairs(teams) do
@@ -1525,7 +1597,7 @@ end)
             end
         end
         
-        -- Copy menu settings
+        
         export_data.LUASENSE.menu = {}
         for category, items in pairs(menu) do
             if category == "config" then goto skip_category end
@@ -1539,7 +1611,7 @@ end)
             ::skip_category::
         end
         
-        -- Save to file
+        
         local success = config_file.save(cfg_name, export_data)
         
         if success then
@@ -1574,7 +1646,7 @@ end)
         
         local cfg = config_data.LUASENSE
         
-        -- Apply menu settings
+        
         if cfg.menu then
             for category, items in pairs(cfg.menu) do
                 for key, value in pairs(items) do
@@ -1591,7 +1663,7 @@ end)
             end
         end
         
-        -- Apply AA settings
+        
         for state, teams in pairs(cfg) do
             if state == "menu" then goto skip_state end
             if not aa[state] then goto skip_state end
@@ -1668,7 +1740,6 @@ end)
         cloud_system:upload(cfg_name, config_data)
     end),
     
-    -- ===== CLOUD CONFIG SECTION =====
     cloud_label = ui.new_label("aa", "anti-aimbot angles", prefix("cloud configs")),
     cloud_list = ui.new_listbox("aa", "anti-aimbot angles", "\ncloud configs", {}),
     
@@ -1681,43 +1752,17 @@ end)
         cloud_system:load_selected(selected_idx)
     end),
     
+    cloud_like = ui.new_button("aa", "anti-aimbot angles", "\a89CFF0FFlike", function()
+        local selected_idx = ui.get(menu["config"]["cloud_list"]) + 1
+        cloud_system:like_selected(selected_idx)
+    end),
     cloud_delete = ui.new_button("aa", "anti-aimbot angles", "\aC84632FFdelete (own only)", function()
         local selected_idx = ui.get(menu["config"]["cloud_list"]) + 1
         cloud_system:delete_selected(selected_idx)
     end),
-    
-    cloud_info = ui.new_label("aa", "anti-aimbot angles", "Upload from local configs | Download to use"),
     }
 }
-if i == "config" then
-    for ii, vv in next, value do
-        local fix = true
-        local config_cat = ui.get(menu["config"]["category"])
-        
-        -- Always visible
-        if ii == "category_label" or ii == "category" or ii == "separator" then
-            fix = true
-        
-        -- Local config visibility
-        elseif ii == "local_label" or ii == "local_list" or ii == "local_name" or 
-               ii == "local_save" or ii == "local_load" or ii == "local_delete" or 
-               ii == "local_upload" then
-            fix = (config_cat == "local")
-        
-        -- Cloud config visibility
-        elseif ii == "cloud_label" or ii == "cloud_list" or ii == "cloud_refresh" or 
-               ii == "cloud_load" or ii == "cloud_delete" or ii == "cloud_info" then
-            fix = (config_cat == "cloud")
-        
-        else
-            fix = false
-        end
-        
-        ui.set_visible(vv, i == current and fix)
-    end
-end
 
--- Initialize local config list on load
 client.delay_call(0.1, function()
     local items = {}
     local list = config_file.list()
@@ -2897,7 +2942,7 @@ end)
         local ttl = AB_CONFIG.persist_ttl
         local max = AB_CONFIG.max_entries
         
-        -- Prune old entries
+        
         for key, entry in pairs(tbl.antiaim.log) do
             if type(entry) == "table" and not entry.locked then
                 if (entry.last or 0) > 0 and (now - entry.last) > ttl then
@@ -2910,7 +2955,7 @@ end)
             end
         end
         
-        -- Count total entries
+        
         local total = 0
         for _ in pairs(tbl.antiaim.log) do total = total + 1 end
         
@@ -2956,10 +3001,10 @@ end)
     end
 
 
-    -- Load on script start
+    
     load_antibf()
 
-    -- Periodic maintenance (every 60 seconds)
+    
     local last_maint = 0
     client.set_event_callback("paint", function()
         local now = globals.realtime()
@@ -2970,12 +3015,12 @@ end)
         end
     end)
 
-    -- Save on shutdown
+    
     client.set_event_callback("shutdown", function()
         save_antibf()
     end)
 
-    -- Export functions globally
+    
     tbl.antiaim.ab_apply = apply_antibf_adjustments
     tbl.antiaim.ab_reset = antibf_reset
     tbl.antiaim.ab_save = save_antibf
@@ -3833,12 +3878,12 @@ end)
 local function compute_exponential_delay(key, slider_base, enemy, cache_table_name, env_min, env_max)
     slider_base = math.max(1.01, tonumber(slider_base) or 1.01)
     
-    -- Initialize advanced state tracking
+    
     tbl.antiaim.exp_state = tbl.antiaim.exp_state or {}
     local s = tbl.antiaim.exp_state[key] or {}
     local now = globals.realtime()
     
-    -- First-time initialization with quantum seed
+    
     if not s.seed then
         s.seed = 0
         for i = 1, #key do 
@@ -3856,9 +3901,9 @@ local function compute_exponential_delay(key, slider_base, enemy, cache_table_na
         }
     end
     
-    -- =======================================================================
-    -- ADVANCED DISTANCE & CONTEXT ANALYSIS
-    -- =======================================================================
+    
+    
+    
     
     local dist_m = 50
     local velocity = 0
@@ -3868,7 +3913,7 @@ local function compute_exponential_delay(key, slider_base, enemy, cache_table_na
     if enemy and entity.is_alive(enemy) then
         local lp = entity.get_local_player()
         if lp and entity.is_alive(lp) then
-            -- Distance calculation
+            
             local ex, ey, ez = entity.get_prop(enemy, "m_vecOrigin")
             local lx, ly, lz = entity.get_prop(lp, "m_vecOrigin")
             if ex and lx then
@@ -3877,18 +3922,18 @@ local function compute_exponential_delay(key, slider_base, enemy, cache_table_na
                 dist_m = math.max(1, meters)
             end
             
-            -- Velocity analysis
+            
             local vx, vy, vz = entity.get_prop(enemy, "m_vecVelocity")
             if vx then
                 velocity = math.sqrt(vx*vx + vy*vy) / 250
                 velocity = math.min(1, velocity)
             end
             
-            -- HP-based threat assessment
+            
             local hp = entity.get_prop(enemy, "m_iHealth") or 100
             hp_factor = func.fclamp(hp / 100, 0.3, 1.5)
             
-            -- Weapon threat level
+            
             local wp = entity.get_player_weapon(enemy)
             if wp then
                 local wclass = entity.get_classname(wp) or ""
@@ -3903,37 +3948,37 @@ local function compute_exponential_delay(key, slider_base, enemy, cache_table_na
         end
     end
     
-    -- =======================================================================
-    -- MULTI-LAYER RANDOMNESS SYSTEMS
-    -- =======================================================================
     
-    -- 1. Logistic Map Chaos (deterministic chaos)
+    
+    
+    
+    
     local r_chaos = 3.9 + math.sin(now * 0.3) * 0.1
     s.chaos_state = r_chaos * s.chaos_state * (1 - s.chaos_state)
     
-    -- 2. Fibonacci Spiral Evolution
+    
     local fib_next = s.fibonacci[1] + s.fibonacci[2]
     s.fibonacci[1], s.fibonacci[2] = s.fibonacci[2], fib_next % 89
     local fib_ratio = s.fibonacci[2] / math.max(1, s.fibonacci[1])
     
-    -- 3. Wave Interference Pattern
+    
     local wave_sum = 0
     for i, w in ipairs(s.wave_states) do
         local phase = w.phase + now * w.freq * 0.1
         wave_sum = wave_sum + math.sin(phase * 2 * math.pi + s.phase_offset) * w.amp
         w.phase = (w.phase + 0.001 * slider_base) % 1
     end
-    wave_sum = (wave_sum + 2) / 4 -- normalize to 0-1
+    wave_sum = (wave_sum + 2) / 4 
     
-    -- 4. Prime Number Modulation
+    
     local primes = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31}
     local tick = globals.tickcount()
     local prime_idx = (tick + s.seed) % #primes + 1
     local prime_mod = primes[prime_idx] / 31
     
-    -- =======================================================================
-    -- ADAPTIVE LEARNING FROM HISTORY
-    -- =======================================================================
+    
+    
+    
     
     local conf = 0
     local pattern_bonus = 0
@@ -3943,127 +3988,127 @@ local function compute_exponential_delay(key, slider_base, enemy, cache_table_na
         local entry = tbl.antiaim.log and tbl.antiaim.log[sid]
         
         if entry and type(entry.count) == "number" then
-            -- Confidence from learning
+            
             conf = func.fclamp((entry.count or 0) / math.max(1, (tbl.antiaim.learn_threshold or 2)), 0, 2)
             if entry.locked then 
                 conf = conf + 0.5 
-                pattern_bonus = 0.3 -- boost when pattern confirmed
+                pattern_bonus = 0.3 
             end
         end
     end
     
-    -- =======================================================================
-    -- ADVANCED TIMING CALCULATION
-    -- =======================================================================
+    
+    
+    
     
     local since_flip = now - (s.last_flip or s.created or now)
     
-    -- Base period with multiple influences
+    
     local base_period = 3.0 + (slider_base - 1) * 2.5
     
-    -- Context modulation
+    
     local dist_factor = func.fclamp(25 / (dist_m + 1), 0.25, 2.5)
     local velocity_factor = 1.0 + velocity * 0.4
     local hp_modulation = 1.0 / hp_factor
     local threat_modulation = 1.0 + (1.0 - threat_level) * 0.3
     
-    -- Confidence reduces period (faster cycling when learning)
+    
     local confidence_factor = 1.0 / (1 + 0.6 * conf)
     
-    -- Combined period
+    
     local period = base_period * dist_factor * confidence_factor * velocity_factor * hp_modulation * threat_modulation
     period = math.max(0.4, period)
     
-    -- Phase calculation with chaos injection
+    
     local phase = func.fclamp((since_flip / period), 0, 10)
     
-    -- =======================================================================
-    -- MULTI-MODAL CURVE SHAPING
-    -- =======================================================================
     
-    -- Dynamic shape parameter influenced by multiple factors
+    
+    
+    
+    
     local shape = 1.5 + (slider_base - 1) * 0.6
-    shape = shape * (1 + s.chaos_state * 0.3) -- chaos modulation
-    shape = shape * (1 + wave_sum * 0.2) -- wave modulation
+    shape = shape * (1 + s.chaos_state * 0.3) 
+    shape = shape * (1 + wave_sum * 0.2) 
     
-    -- Apply sigmoid-like compression to phase
+    
     local phase_shaped = math.pow(phase / (1 + phase), shape)
     
-    -- Exponential curve base
+    
     local base = slider_base
     local denom = base - 1
     
-    -- Multi-component exponential
+    
     local exp_component = denom > 1e-9 and ((base ^ phase_shaped - 1) / denom) or phase_shaped
     
-    -- Fibonacci golden ratio spiral
+    
     local spiral_component = (1 + fib_ratio) / 2.618
     
-    -- Wave interference
+    
     local wave_component = wave_sum
     
-    -- Combine with weighted blend
+    
     local frac = exp_component * 0.5 + spiral_component * 0.3 + wave_component * 0.2
     
-    -- Compression to prevent over-extension
+    
     local compress = 1 / (1 + (base - 1) * 0.05)
     frac = math.pow(func.fclamp(frac, 0, 1), compress)
     
-    -- =======================================================================
-    -- AMPLITUDE & SCALING
-    -- =======================================================================
+    
+    
+    
     
     local max_delay = 22
     
-    -- Dynamic amplitude based on multiple factors
+    
     local amplitude = 1.0
-    amplitude = amplitude + conf * 0.6 -- learning boost
-    amplitude = amplitude + (1.0 / (dist_m/20 + 1)) * 0.5 -- distance boost
-    amplitude = amplitude + pattern_bonus -- pattern confirmation boost
-    amplitude = amplitude * (1 + threat_level * 0.3) -- threat boost
+    amplitude = amplitude + conf * 0.6 
+    amplitude = amplitude + (1.0 / (dist_m/20 + 1)) * 0.5 
+    amplitude = amplitude + pattern_bonus 
+    amplitude = amplitude * (1 + threat_level * 0.3) 
     amplitude = func.fclamp(amplitude, 0.5, 2.5)
     
-    -- Map to delay range
+    
     local mapped = 1 + (max_delay - 1) * frac * amplitude
     
-    -- =======================================================================
-    -- MULTI-SOURCE JITTER
-    -- =======================================================================
     
-    -- Chaos jitter (deterministic but unpredictable)
+    
+    
+    
+    
     local chaos_jitter = (s.chaos_state - 0.5) * 2
     
-    -- Prime number jitter
+    
     local prime_jitter = (prime_mod - 0.5) * 2
     
-    -- Wave jitter
+    
     local wave_jitter = (wave_sum - 0.5) * 2
     
-    -- Phase-dependent fade (less jitter when settled)
+    
     local jitter_fade = 1.0 - math.sqrt(func.fclamp(phase, 0, 1))
     
-    -- Combined jitter strength
+    
     local jitter_strength = (0.9 + (slider_base - 1) * 0.5) * jitter_fade
     
-    -- Apply weighted jitter
+    
     local total_jitter = (chaos_jitter * 0.4 + prime_jitter * 0.3 + wave_jitter * 0.3) * jitter_strength
     
-    -- =======================================================================
-    -- FINAL CALCULATION
-    -- =======================================================================
+    
+    
+    
     
     local result = mapped + total_jitter
     
-    -- Apply environmental constraints
+    
     local min_limit = env_min and math.max(1, math.floor(env_min)) or 1
     local max_limit = env_max and math.max(min_limit, math.floor(env_max)) or max_delay
     
     result = func.fclamp(result, min_limit, max_limit)
     result = math.max(1, math.min(max_delay, math.floor(result + 0.5)))
     
-    -- =======================================================================
-    -- CACHING & STATE UPDATE
-    -- =======================================================================
+    
+    
+    
     
     if cache_table_name and tbl.antiaim[cache_table_name] then
         tbl.antiaim[cache_table_name][key] = result
@@ -4530,21 +4575,21 @@ end
                 local jitter_value = ui.get(menutbl["jitter_slider1"]) or 0
 
                 if jitter_type == "luasense" and jitter_value ~= 0 then
-                    -- Initialize counter
+                    
                     if not tbl.antiaim.jitter_counter then
                         tbl.antiaim.jitter_counter = 0
                     end
                     
-                    -- Core jitter patterns (simple but effective)
+                    
                     local patterns = {
-                        -- Pattern 1: Alternating with micro-adjustments
+                        
                         function(base, tick)
                             local side = (tick % 2 == 0) and 1 or -1
                             local micro = client.random_int(-5, 5)
                             return base * side + micro
                         end,
                         
-                        -- Pattern 2: 3-way cycle
+                        
                         function(base, tick)
                             local phase = tick % 3
                             if phase == 0 then return base
@@ -4552,12 +4597,12 @@ end
                             else return client.random_int(-base, base) end
                         end,
                         
-                        -- Pattern 3: Random with bounds
+                        
                         function(base, tick)
                             return client.random_int(-math.abs(base), math.abs(base))
                         end,
                         
-                        -- Pattern 4: Exponential decay
+                        
                         function(base, tick)
                             local decay = 1 - ((tick % 8) / 8)
                             local side = (tick % 2 == 0) and 1 or -1
@@ -4565,35 +4610,35 @@ end
                         end
                     }
                     
-                    -- Pattern selection (changes every 4-7 ticks randomly)
+                    
                     local pattern_change_rate = client.random_int(4, 7)
                     if tbl.antiaim.jitter_counter % pattern_change_rate == 0 then
                         tbl.antiaim.jitter_pattern = client.random_int(1, #patterns)
                     end
                     
-                    -- Get current pattern
+                    
                     local current_pattern = patterns[tbl.antiaim.jitter_pattern or 1]
                     
-                    -- Calculate jitter amount
+                    
                     local jitter_amount = current_pattern(jitter_value, tbl.antiaim.jitter_counter)
                     
-                    -- Clamp to valid range
+                    
                     jitter_amount = math.max(-180, math.min(180, math.floor(jitter_amount)))
                     
-                    -- Apply to yaw
+                    
                     local current_yaw = ui.get(tbl.items.yaw[2]) or 0
                     ui.set(tbl.items.yaw[2], tbl.clamp(current_yaw + jitter_amount))
                     
-                    -- Disable default jitter (we're applying manually)
+                    
                     ui.set(tbl.items.jitter[1], "off")
                     ui.set(tbl.items.jitter[2], 0)
                     
-                    -- Increment counter
+                    
                     if arg.chokedcommands == 0 then
                         tbl.antiaim.jitter_counter = tbl.antiaim.jitter_counter + 1
                     end
                 else
-                    -- Reset when disabled
+                    
                     ui.set(tbl.items.jitter[1], "off")
                     ui.set(tbl.items.jitter[2], 0)
                     tbl.antiaim.jitter_counter = 0
@@ -4874,6 +4919,7 @@ for i, v in next, menu do
                     end
                 end
                 ui.set_visible(vv, i == current and index == sub and fix)
+                
             end
         elseif i == "visuals & misc" and index ~= "submenu" then
             for ii, vv in next, value do
@@ -4928,6 +4974,28 @@ for i, v in next, menu do
         else
             ui.set_visible(value, i == current)
         end
+            if i == "config" and index ~= "category" and index ~= "category_label" and index ~= "separator" then
+                local config_cat = ui.get(menu["config"]["category"])
+                
+                
+                if index == "local_label" or index == "local_list" or index == "local_name" or 
+                index == "local_save" or index == "local_load" or index == "local_delete" or 
+                index == "local_upload" then
+                    ui.set_visible(value, i == current and config_cat == "local")
+                
+                
+                elseif index == "cloud_label" or index == "cloud_list" or index == "cloud_refresh" or 
+                    index == "cloud_load" or index == "cloud_like" or index == "cloud_delete" then
+                    ui.set_visible(value, i == current and config_cat == "cloud")
+                
+                
+                elseif index == "category_label" or index == "category" or index == "separator" then
+                    ui.set_visible(value, i == current)
+                
+                else
+                    ui.set_visible(value, false)
+                end
+            end
     end
 end
 
@@ -6418,3 +6486,4 @@ end)({
     end
     
 })
+
