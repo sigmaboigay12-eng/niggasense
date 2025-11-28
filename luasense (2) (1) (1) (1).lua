@@ -4,7 +4,7 @@
         local aa = require "gamesense/antiaim_funcs" or error "https://gamesense.pub/forums/viewtopic.php?id=29665"
         local surface = require "gamesense/surface"
         local base64 = require "gamesense/base64" or error("Base64 library required")
-        local clipboard = require "gamesense/clipboard" or error("Clipboard library required")
+        local clipboard_lib = require "gamesense/clipboard" or error("Clipboard library required")
         local json = require("json")
         local trace = require "gamesense/trace"
         local c_entity = require("gamesense/entity")
@@ -121,7 +121,71 @@
         do
             local CONFIG_FILE = ".\\luasense.cfg"
             
+            -- Helper function to serialize any value type
+            local function serialize_value(value)
+                if type(value) == "table" then
+                    local result = {}
+                    for k, v in pairs(value) do
+                        result[k] = serialize_value(v)
+                    end
+                    return result
+                else
+                    return value
+                end
+            end
             
+            -- Capture ALL menu values recursively
+            local function capture_all_menu_values()
+                local captured = {}
+                
+                for category, items in pairs(menu) do
+                    captured[category] = {}
+                    
+                    for key, ctrl in pairs(items) do
+                        local ok, val = pcall(ui.get, ctrl)
+                        if ok and val ~= nil then
+                            captured[category][key] = serialize_value(val)
+                        end
+                    end
+                end
+                
+                return captured
+            end
+            
+            -- Capture ALL anti-aim builder values
+            local function capture_all_aa_values()
+                local captured = {}
+                
+                for state, teams in pairs(aa) do
+                    captured[state] = {}
+                    for team, sections in pairs(teams) do
+                        captured[state][team] = {}
+                        
+                        for section_name, section in pairs(sections) do
+                            if section_name == "button" then goto continue_section end
+                            
+                            if section_name == "type" then
+                                local ok, val = pcall(ui.get, section)
+                                captured[state][team][section_name] = ok and val or nil
+                            elseif type(section) == "table" then
+                                captured[state][team][section_name] = {}
+                                for k, ctrl in pairs(section) do
+                                    local ok, val = pcall(ui.get, ctrl)
+                                    if ok and val ~= nil then
+                                        captured[state][team][section_name][k] = serialize_value(val)
+                                    end
+                                end
+                            end
+                            
+                            ::continue_section::
+                        end
+                    end
+                end
+                
+                return captured
+            end
+            
+            -- Read config file
             local function read_config_file()
                 if type(readfile) ~= "function" then return {} end
                 local ok, content = pcall(readfile, CONFIG_FILE)
@@ -133,52 +197,104 @@
                 return data
             end
             
-            
+            -- Write config file
             local function write_config_file(data)
                 if type(writefile) ~= "function" then return false end
                 
                 local ok, json_str = pcall(json.stringify, data)
                 if not ok then return false end
                 
-                local ok2, err = pcall(writefile, CONFIG_FILE, json_str)
+                local ok2 = pcall(writefile, CONFIG_FILE, json_str)
                 return ok2
             end
             
-            
-            function config_file.save(name, config_data)
+            -- SAVE: Capture everything and save to file
+            function config_file.save(name)
                 if not name or name == "" then return false end
                 
                 local all_configs = read_config_file()
                 local username = js.MyPersonaAPI.GetName()
                 
-                
-                local timestamp = client.system_time()
-                local date_str = js.MyPersonaAPI.GetName()
-                
-                all_configs[name] = {
+                -- Capture EVERYTHING
+                local full_config = {
+                    menu = capture_all_menu_values(),
+                    aa = capture_all_aa_values(),
+                    
+                    -- Metadata
                     name = name,
-                    data = config_data,
-                    author = date_str,
-                    timestamp = timestamp,
-                    date = date_str
+                    author = username,
+                    timestamp = client.system_time(),
+                    date = os.date("%Y-%m-%d %H:%M:%S"),
+                    version = "luasense_v2"
                 }
+                
+                all_configs[name] = full_config
                 
                 return write_config_file(all_configs)
             end
             
-            
+            -- LOAD: Restore everything from saved config
             function config_file.load(name)
                 if not name or name == "" then return nil end
                 
                 local all_configs = read_config_file()
-                local entry = all_configs[name]
+                local config = all_configs[name]
                 
-                if not entry or not entry.data then return nil end
+                if not config then return nil end
                 
-                return entry.data, entry
+                -- Restore menu values
+                if config.menu then
+                    for category, items in pairs(config.menu) do
+                        if menu[category] then
+                            for key, value in pairs(items) do
+                                if menu[category][key] then
+                                    pcall(function()
+                                        if type(value) == "table" then
+                                            ui.set(menu[category][key], unpack(value))
+                                        else
+                                            ui.set(menu[category][key], value)
+                                        end
+                                    end)
+                                end
+                            end
+                        end
+                    end
+                end
+                
+                -- Restore AA values
+                if config.aa then
+                    for state, teams in pairs(config.aa) do
+                        if aa[state] then
+                            for team, sections in pairs(teams) do
+                                if aa[state][team] then
+                                    for section_name, section in pairs(sections) do
+                                        if section_name == "type" then
+                                            pcall(ui.set, aa[state][team].type, section)
+                                        elseif type(section) == "table" and aa[state][team][section_name] then
+                                            for k, v in pairs(section) do
+                                                local ctrl = aa[state][team][section_name][k]
+                                                if ctrl then
+                                                    pcall(function()
+                                                        if type(v) == "table" then
+                                                            ui.set(ctrl, unpack(v))
+                                                        else
+                                                            ui.set(ctrl, v)
+                                                        end
+                                                    end)
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                
+                return config
             end
             
-            
+            -- DELETE: Remove config from file
             function config_file.delete(name)
                 if not name or name == "" then return false end
                 
@@ -188,21 +304,21 @@
                 return write_config_file(all_configs)
             end
             
-            
+            -- LIST: Get all saved configs
             function config_file.list()
                 local all_configs = read_config_file()
                 local names = {}
                 
-                for name, entry in pairs(all_configs) do
+                for name, config in pairs(all_configs) do
                     table.insert(names, {
                         name = name,
-                        author = entry.author or "Unknown",
-                        date = entry.date or "Unknown",
-                        timestamp = entry.timestamp or 0
+                        author = config.author or "Unknown",
+                        date = config.date or "Unknown",
+                        timestamp = config.timestamp or 0
                     })
                 end
                 
-                
+                -- Sort by timestamp (newest first)
                 table.sort(names, function(a, b)
                     return (a.timestamp or 0) > (b.timestamp or 0)
                 end)
@@ -210,14 +326,14 @@
                 return names
             end
             
-            
+            -- EXPORT: Convert config to base64 string for clipboard
             function config_file.export(name)
                 local all_configs = read_config_file()
-                local entry = all_configs[name]
+                local config = all_configs[name]
                 
-                if not entry then return nil end
+                if not config then return nil end
                 
-                local ok, json_str = pcall(json.stringify, entry.data)
+                local ok, json_str = pcall(json.stringify, config)
                 if not ok then return nil end
                 
                 local ok2, encoded = pcall(base64.encode, json_str)
@@ -226,15 +342,25 @@
                 return encoded
             end
             
-            
-            function config_file.import(encoded_data)
+            -- IMPORT: Parse base64 string and return config data
+            function config_file.import(encoded_data, import_name)
                 local ok, json_str = pcall(base64.decode, encoded_data)
                 if not ok then return nil, "Failed to decode" end
                 
-                local ok2, data = pcall(json.parse, json_str)
+                local ok2, config = pcall(json.parse, json_str)
                 if not ok2 then return nil, "Failed to parse JSON" end
                 
-                return data
+                -- If import_name provided, save it immediately
+                if import_name and import_name ~= "" then
+                    local all_configs = read_config_file()
+                    config.name = import_name
+                    config.imported = true
+                    config.import_date = tostring(client.system_time())
+                    all_configs[import_name] = config
+                    write_config_file(all_configs)
+                end
+                
+                return config
             end
         end
 
@@ -832,7 +958,7 @@
                 return (z and ("\a32a852FFluasense \a698a6dFF~ \a414141FF(\ab5b5b5FF%s\a414141FF) \a89f596FF%s"):format(x, z) or ("\a32a852FFluasense \a698a6dFF~ \a89f596FF%s"):format(x)) 
             end
             local ffi = require("ffi")
-            local clipboard = {
+            local clipboard_legacy = {
                 ["ffi"] = ffi.cdef([[
                     typedef int(__thiscall* get_clipboard_text_count)(void*);
                     typedef void(__thiscall* set_clipboard_text)(void*, const char*, int);
@@ -1571,7 +1697,7 @@
             
             separator = ui.new_label("aa", "anti-aimbot angles", "\n "),
             
-            
+            -- LOCAL CONFIGS
             local_label = ui.new_label("aa", "anti-aimbot angles", prefix("local configs")),
             local_list = ui.new_listbox("aa", "anti-aimbot angles", "\nlocal configs", {}),
             local_name = ui.new_textbox("aa", "anti-aimbot angles", prefix("config name")),
@@ -1583,58 +1709,17 @@
                     return
                 end
                 
-                
-                local export_data = { LUASENSE = {} }
-                
-                
-                for state, teams in pairs(aa) do
-                    export_data.LUASENSE[state] = export_data.LUASENSE[state] or {}
-                    for team, block in pairs(teams) do
-                        export_data.LUASENSE[state][team] = export_data.LUASENSE[state][team] or {}
-                        for section_name, section in pairs(block) do
-                            if section_name == "button" then goto continue_section end
-                            if section_name == "type" then
-                                local ok, val = pcall(ui.get, section)
-                                export_data.LUASENSE[state][team][section_name] = ok and val or nil
-                            elseif type(section) == "table" then
-                                export_data.LUASENSE[state][team][section_name] = {}
-                                for k, ctrl in pairs(section) do
-                                    local ok, val = pcall(ui.get, ctrl)
-                                    if ok and val ~= nil then
-                                        export_data.LUASENSE[state][team][section_name][k] = val
-                                    end
-                                end
-                            end
-                            ::continue_section::
-                        end
-                    end
-                end
-                
-                
-                export_data.LUASENSE.menu = {}
-                for category, items in pairs(menu) do
-                    if category == "config" then goto skip_category end
-                    export_data.LUASENSE.menu[category] = {}
-                    for key, ctrl in pairs(items) do
-                        local ok, val = pcall(ui.get, ctrl)
-                        if ok and val ~= nil then
-                            export_data.LUASENSE.menu[category][key] = val
-                        end
-                    end
-                    ::skip_category::
-                end
-                
-                
-                local success = config_file.save(cfg_name, export_data)
+                local success = config_file.save(cfg_name)
                 
                 if success then
+                    -- Update listbox
                     local items = {}
                     local list = config_file.list()
                     for i, entry in ipairs(list) do
                         table.insert(items, string.format("%s [%s]", entry.name, entry.date))
                     end
                     ui.update(menu["config"]["local_list"], items)
-                    push_notify("Config '" .. cfg_name .. "' saved!")
+                    push_notify("Config '" .. cfg_name .. "' saved! ")
                 else
                     push_notify("Failed to save config ")
                 end
@@ -1650,62 +1735,13 @@
                 end
                 
                 local cfg_name = list[selected_idx].name
-                local config_data, entry = config_file.load(cfg_name)
+                local config = config_file.load(cfg_name)
                 
-                if not config_data then
-                    push_notify("Config data not found ")
-                    return
+                if config then
+                    push_notify("Config '" .. cfg_name .. "' loaded! ")
+                else
+                    push_notify("Failed to load config ")
                 end
-                
-                local cfg = config_data.LUASENSE
-                
-                
-                if cfg.menu then
-                    for category, items in pairs(cfg.menu) do
-                        for key, value in pairs(items) do
-                            if menu[category] and menu[category][key] then
-                                pcall(function()
-                                    if type(value) == "table" then
-                                        ui.set(menu[category][key], unpack(value))
-                                    else
-                                        ui.set(menu[category][key], value)
-                                    end
-                                end)
-                            end
-                        end
-                    end
-                end
-                
-                
-                for state, teams in pairs(cfg) do
-                    if state == "menu" then goto skip_state end
-                    if not aa[state] then goto skip_state end
-                    for team, sections in pairs(teams or {}) do
-                        if not aa[state][team] then goto skip_team end
-                        for section_name, section in pairs(sections or {}) do
-                            if section_name == "type" then
-                                pcall(ui.set, aa[state][team].type, section)
-                            elseif type(section) == "table" and aa[state][team][section_name] then
-                                for k, v in pairs(section) do
-                                    local ctrl = aa[state][team][section_name][k]
-                                    if ctrl then
-                                        pcall(function()
-                                            if type(v) == "table" then
-                                                ui.set(ctrl, unpack(v))
-                                            else
-                                                ui.set(ctrl, v)
-                                            end
-                                        end)
-                                    end
-                                end
-                            end
-                        end
-                        ::skip_team::
-                    end
-                    ::skip_state::
-                end
-                
-                push_notify("Config '" .. cfg_name .. "' loaded! ")
             end),
             
             local_delete = ui.new_button("aa", "anti-aimbot angles", "\aC84632FFdelete", function()
@@ -1718,16 +1754,18 @@
                 end
                 
                 local cfg_name = list[selected_idx].name
-                
                 local success = config_file.delete(cfg_name)
                 
                 if success then
+                    -- Update listbox
                     local items = {}
                     local new_list = config_file.list()
                     for i, entry in ipairs(new_list) do
                         table.insert(items, string.format("%s [%s]", entry.name, entry.date))
                     end
                     ui.update(menu["config"]["local_list"], items)
+                    
+                    -- Also delete from cloud if it exists
                     pcall(function()
                         for i = #cloud_system.configs, 1, -1 do
                             local cloud_cfg = cloud_system.configs[i]
@@ -1760,7 +1798,59 @@
                     
                     push_notify("Config '" .. cfg_name .. "' deleted! ")
                 else
-                    push_notify("Failed to delete config! ")
+                    push_notify("Failed to delete config ")
+                end
+            end),
+            
+            local_export = ui.new_button("aa", "anti-aimbot angles", "\a89f596FFexport", function()
+                local list = config_file.list()
+                local selected_idx = ui.get(menu["config"]["local_list"]) + 1
+                
+                if selected_idx <= 0 or selected_idx > #list then
+                    push_notify("Please select a config to export ")
+                    return
+                end
+                
+                local cfg_name = list[selected_idx].name
+                local encoded = config_file.export(cfg_name)
+                
+                if encoded then
+                    clipboard_lib.set(encoded)
+                    push_notify("Config '" .. cfg_name .. "' copied to clipboard! ")
+                else
+                    push_notify("Failed to export config ")
+                end
+            end),
+            
+            local_import = ui.new_button("aa", "anti-aimbot angles", "\a32a852FFimport", function()
+                local clipboard_text = clipboard_lib.get()
+                
+                if not clipboard_text or clipboard_text == "" then
+                    push_notify("Clipboard is empty ")
+                    return
+                end
+                
+                local cfg_name = ui.get(menu["config"]["local_name"])
+                if not cfg_name or cfg_name == "" then
+                    push_notify("Please enter a name for imported config ")
+                    return
+                end
+                
+                local config, err = config_file.import(clipboard_text, cfg_name)
+                
+                if config then
+                    config_file.load(cfg_name)
+                    
+                    local items = {}
+                    local list = config_file.list()
+                    for i, entry in ipairs(list) do
+                        table.insert(items, string.format("%s [%s]", entry.name, entry.date))
+                    end
+                    ui.update(menu["config"]["local_list"], items)
+                    
+                    push_notify("Config imported! ")
+                else
+                    push_notify("Failed to import: " .. (err or "unknown error") .. " ")
                 end
             end),
             
@@ -1774,16 +1864,17 @@
                 end
                 
                 local cfg_name = list[selected_idx].name
-                local config_data, entry = config_file.load(cfg_name)
+                local config = config_file.load(cfg_name)
                 
-                if not config_data then
+                if not config then
                     push_notify("Config data not found ")
                     return
                 end
                 
-                cloud_system:upload(cfg_name, config_data)
+                cloud_system:upload(cfg_name, config)
             end),
             
+            -- CLOUD CONFIGS
             cloud_label = ui.new_label("aa", "anti-aimbot angles", prefix("cloud configs")),
             cloud_list = ui.new_listbox("aa", "anti-aimbot angles", "\ncloud configs", {}),
             
@@ -1800,68 +1891,28 @@
                 local selected_idx = ui.get(menu["config"]["cloud_list"]) + 1
                 cloud_system:like_selected(selected_idx)
             end),
+            
             cloud_delete = ui.new_button("aa", "anti-aimbot angles", "\aC84632FFdelete", function()
                 local selected_idx = ui.get(menu["config"]["cloud_list"]) + 1
-                
-                if selected_idx < 1 or selected_idx > #cloud_system.configs then
-                    push_notify("Please select a config to delete ")
-                    return
-                end
-                
-                local config = cloud_system.configs[selected_idx]
-                local cfg_name = config.name
-                
-                local function normalize(s) return tostring(s or ""):gsub("%s+", ""):lower() end
-                if normalize(config.author) ~= normalize(cloud_system.username or username) then
-                    push_notify("You can only delete your own configs! ")
-                    return
-                end
-                
-                table.remove(cloud_system.configs, selected_idx)
-                
-                cloud_system:save_cache()
-                cloud_system:update_listbox()
-                
-                local ok, json_str = pcall(json.stringify, {configs = cloud_system.configs})
-                if ok then
-                    http.put(cloud_system.api_url, {
-                        headers = {
-                            ["Content-Type"] = "application/json",
-                            ["X-Master-Key"] = cloud_system.api_key,
-                            ["X-Bin-Meta"] = "false"
-                        },
-                        body = json_str
-                    }, function(success, response)
-                        if success and response.status == 200 then
-                            pcall(function()
-                                local list = config_file.list()
-                                for i, entry in ipairs(list) do
-                                    if entry.name == cfg_name and entry.author == config.author then
-                                        config_file.delete(cfg_name)
-                                        
-                                        local items = {}
-                                        local new_list = config_file.list()
-                                        for j, e in ipairs(new_list) do
-                                            table.insert(items, string.format("%s [%s]", e.name, e.date))
-                                        end
-                                        ui.update(menu["config"]["local_list"], items)
-                                        break
-                                    end
-                                end
-                            end)
-                            
-                            push_notify("Config '" .. cfg_name .. "' deleted from cloud and local! ")
-                        else
-                            push_notify("Failed to delete config from server ")
-                        end
-                    end)
-                else
-                    push_notify("Failed to encode data ")
-                end
+                cloud_system:delete_selected(selected_idx)
             end),
             }
         }
 
+        -- Update listbox on selection change
+        client.delay_call(0.2, function()
+            ui.set_callback(menu["config"]["local_list"], function()
+                local list = config_file.list()
+                local selected_idx = ui.get(menu["config"]["local_list"]) + 1
+                
+                if selected_idx > 0 and selected_idx <= #list then
+                    local cfg_name = list[selected_idx].name
+                    ui.set(menu["config"]["local_name"], cfg_name)
+                end
+            end)
+        end)
+
+        -- Initialize listbox on startup
         client.delay_call(0.1, function()
             local items = {}
             local list = config_file.list()
@@ -1869,17 +1920,6 @@
                 table.insert(items, string.format("%s [%s]", entry.name, entry.date))
             end
             ui.update(menu["config"]["local_list"], items)
-        end)
-        client.delay_call(0.2, function()
-            ui.set_callback(menu["config"]["local_list"], function()
-                local list = config_file.list()
-                local selected_idx = ui.get(menu["config"]["local_list"]) + 1 or nil
-                
-                if selected_idx > 0 and selected_idx <= #list then
-                    local cfg_name = list[selected_idx].name
-                    ui.set(menu["config"]["local_name"], cfg_name)
-                end
-            end)
         end)
 
             for i, v in next, tbl.states do
@@ -4660,7 +4700,7 @@
                                             fix = ui.get(vv["method"]) == "luasense" and ui.get(vv["antibf"]) == "yes"
                                         elseif iii == "left" or iii == "right" or iii == "delay_mode" then
                                             fix = ui.get(vv["method"]) == "luasense"
-                                        elseif iii == "randomization" or iii == "auto_rand" then
+                                        elseif iii == "randomization" then
                                             fix = ui.get(vv["enablerand"]) == true
                                         elseif iii == "delay" then
                                             fix = ui.get(vv["method"]) == "luasense" and ui.get(vv["delay_mode"]) == "fixed"
@@ -4670,6 +4710,19 @@
                                             fix = ui.get(vv["method"]) == "luasense" and ui.get(vv["delay_mode"]) == "min/max"
                                         elseif iii == "delay_exponentialfunction" or iii == "delay_exponential_min" or iii == "delay_exponential_max" then
                                             fix = ui.get(vv["method"]) == "luasense" and ui.get(vv["delay_mode"]) == "exponential"
+                                        -- **NEW: Body yaw visibility controls**
+                                        elseif iii == "body1" or iii == "body_slider1" or iii == "custom_slider1" then
+                                            -- Show body yaw controls for auto type
+                                            if iii == "body_slider1" then
+                                                -- Show body slider when body mode is static or jitter
+                                                fix = ui.get(vv["body1"]) == "static" or ui.get(vv["body1"]) == "jitter"
+                                            elseif iii == "custom_slider1" then
+                                                -- Show custom slider when body mode is luasense
+                                                fix = ui.get(vv["body1"]) == "luasense"
+                                            else
+                                                -- Always show body1 (body mode selector)
+                                                fix = true
+                                            end
                                         end
                                     end
                                     ui.set_visible(vvv, section and selected and current == "anti aimbot" and sub == "builder" and mode == ii and fix)
@@ -4770,17 +4823,15 @@
                 if i == "config" and index ~= "category" and index ~= "category_label" and index ~= "separator" then
                     local config_cat = ui.get(menu["config"]["category"])
                     
-                    
                     if index == "local_label" or index == "local_list" or index == "local_name" or 
                     index == "local_save" or index == "local_load" or index == "local_delete" or 
-                    index == "local_upload" then
+                    index == "local_export" or index == "local_import" or index == "local_upload" then
                         ui.set_visible(value, i == current and config_cat == "local")
                     
-                    
-                    elseif index == "cloud_label" or index == "cloud_list" or index == "cloud_selected" or 
-                        index == "cloud_refresh" or index == "cloud_load" or index == "cloud_like" or  index == "cloud_delete" then
+                    elseif index == "cloud_label" or index == "cloud_list" or 
+                        index == "cloud_refresh" or index == "cloud_load" or 
+                        index == "cloud_like" or index == "cloud_delete" then
                         ui.set_visible(value, i == current and config_cat == "cloud")
-                    
                     
                     elseif index == "category_label" or index == "category" or index == "separator" then
                         ui.set_visible(value, i == current)
@@ -7677,4 +7728,5 @@
             end
             
         })
+
 
