@@ -7434,277 +7434,230 @@
 
         setup_resolver()
 
-                    local function console_print_segments(...)
-                        for _, seg in pairs({...}) do
-                            local r, g, b, txt = 255, 255, 255, seg
-                            if type(seg) == "table" then
-                                r, g, b, txt = seg[1], seg[2], seg[3], seg[4]
-                            end
-                            client.color_log(r or 255, g or 255, b or 255, tostring(txt or "") .. "\x00")
-                        end
-                        client.color_log(255, 255, 255, " ")
-                    end
+            if not __luasense_console_handlers_registered then
+                __luasense_console_handlers_registered = true
 
-                    local function logs_enabled(name)
-                        local sel = ui.get(menu["visuals & misc"]["visuals"]["logs"]) or {}
-                        for _, v in ipairs(sel) do
-                            if type(v) == "string" and v:lower() == name:lower() then
-                                return true
-                            end
+                local function console_print_segments(...)
+                    for _, seg in pairs({...}) do
+                        local r, g, b, txt = 255, 255, 255, seg
+                        if type(seg) == "table" then
+                            r, g, b, txt = seg[1], seg[2], seg[3], seg[4]
                         end
-                        return false
+                        client.color_log(r or 255, g or 255, b or 255, tostring(txt or "") .. "\x00")
                     end
-            local fired_shots = {}
-                local bullet_impacts = {}
-
-                local function totime(ticks)
-                    return string.format("%.2fs", (ticks or 0) * globals.tickinterval())
+                    client.color_log(255, 255, 255, " ")
                 end
-            client.set_event_callback("bullet_impact", function(e)
-                    local idx = client.userid_to_entindex(e.userid)
-                    if idx == entity.get_local_player() then
-                        local now_tick = globals.tickcount()
-                        if #bullet_impacts > 150 and bullet_impacts[#bullet_impacts].tick ~= now_tick then
-                            bullet_impacts = {}
+
+                local function logs_enabled(name)
+                    local sel = ui.get(menu["visuals & misc"]["visuals"]["logs"]) or {}
+                    for _, v in ipairs(sel) do
+                        if type(v) == "string" and v:lower() == name:lower() then
+                            return true
                         end
-                        bullet_impacts[#bullet_impacts + 1] = {
-                            tick = now_tick,
-                            origin = vector(client.eye_position()),
-                            shot = vector(e.x, e.y, e.z)
-                        }
+                    end
+                    return false
+                end
+                
+            client.set_event_callback("item_purchase", function(e)
+                if not logs_enabled("buy") then return end
+                local idx = client.userid_to_entindex(e.userid)
+                if not idx then return end
+                local player = c_entity.new(idx)
+                local name = player:get_player_name() or "?"
+                local weapon = (e.weapon or ""):lower()
+
+                local br, bg, bb = 255, 255, 255
+                local gr, gg, gb = ui.get(menu["visuals & misc"]["visuals"]["watermark_color"])
+                local sr, sg, sb = 255, 255, 255
+                local buyr, buyg, buyb = 255,255,255
+
+                local parts = {}
+                table.insert(parts, {br, bg, bb, "["})
+                table.insert(parts, {gr, gg, gb, "Lua"})
+                table.insert(parts, {sr, sg, sb, "Sense"})
+                table.insert(parts, {br, bg, bb, "] "})
+                table.insert(parts, {buyr, buyg, buyb, name .. " bought "})
+                table.insert(parts, {255,255,255, weapon})
+                console_print_segments(unpack(parts))
+            end)
+            
+            local fired_shots = {}
+            local bullet_impacts = {}
+
+            local function totime(ticks)
+                return string.format("%.2fs", (ticks or 0) * globals.tickinterval())
+            end
+
+            client.set_event_callback("aim_fire", function(shot)
+                local now_tick = globals.tickcount()
+                local shot_tick = shot.tick or now_tick
+                shot.backtrack = math.max(0, now_tick - shot_tick)
+                shot.backtrack = math.floor(shot.backtrack + 0.5)
+                fired_shots[shot.id] = { fired = shot, spread = 0 }
+            end)
+
+            client.set_event_callback("bullet_impact", function(e)
+                local idx = client.userid_to_entindex(e.userid)
+                if idx == entity.get_local_player() then
+                    local now_tick = globals.tickcount()
+                    if #bullet_impacts > 150 and bullet_impacts[#bullet_impacts].tick ~= now_tick then
+                        bullet_impacts = {}
+                    end
+                    bullet_impacts[#bullet_impacts + 1] = {
+                        tick = now_tick,
+                        origin = vector(client.eye_position()),
+                        shot = vector(e.x, e.y, e.z)
+                    }
+                end
+            end)
+
+            client.set_event_callback("aim_hit", function(shot)
+                if not logs_enabled("hit") then return end
+                local target_name = entity.get_player_name(shot.target) or "?"
+                local target_hp = entity.get_prop(shot.target, "m_iHealth") or "?"
+                local hitgroup_name = hitboxes[shot.hitgroup] or "?"
+                local wanted_hitgroup = hitboxes[(shot.aim_hitbox or shot.hitgroup)] or "?"
+                local dmg = shot.damage or 0
+                local wanted_dmg = shot.damage or 0
+                local spread = ("%.1f"):format(shot.spread or 0)
+                local fired_entry = fired_shots[shot.id]
+                local last_imp = bullet_impacts[#bullet_impacts]
+                local fired = fired_entry and fired_entry.fired
+                local now_tick = globals.tickcount()
+
+                if last_imp and fired and last_imp.tick == now_tick then
+                    local a1 = (last_imp.origin - vector(fired.x, fired.y, fired.z)):angles()
+                    local a2 = (last_imp.origin - last_imp.shot):angles()
+                    fired_entry.spread = vector(a1 - a2):length2d()
+                end
+
+                local bt_tick = fired and fired.backtrack or 0
+                bt_tick = math.floor(bt_tick + 0.5)
+                local bt_time = totime(bt_tick)
+
+                local br, bg, bb = 255, 255, 255
+                local gr, gg, gb = ui.get(menu["visuals & misc"]["visuals"]["watermark_color"])
+                local sr, sg, sb = 255, 255, 255
+
+                local advanced = logs_enabled("advanced")
+
+                local parts = {}
+                table.insert(parts, {br, bg, bb, "["})
+                table.insert(parts, {gr, gg, gb, "Lua"})
+                table.insert(parts, {sr, sg, sb, "Sense"})
+                table.insert(parts, {br, bg, bb, "] "})
+                table.insert(parts, {hr, hg, hb, "Registered"})
+                table.insert(parts, {255,255,255, " shot at "})
+                table.insert(parts, {hr, hg, hb, target_name})
+                table.insert(parts, {255,255,255, "'s "})
+                table.insert(parts, {hr, hg, hb, hitgroup_name})
+                table.insert(parts, {255,255,255, " for "})
+                table.insert(parts, {hr, hg, hb, tostring(dmg) .. "(" .. tostring(wanted_dmg) .. ")"})
+                table.insert(parts, {255,255,255, " "})
+                table.insert(parts, {255,255,255, "(hp: "})
+                table.insert(parts, {hr, hg, hb, tostring(target_hp)})
+                table.insert(parts, {255,255,255, ")"})
+                table.insert(parts, {255,255,255, " (aimed: "})
+                table.insert(parts, {hr, hg, hb, wanted_hitgroup})
+                table.insert(parts, {255,255,255, ")"})
+                table.insert(parts, {255,255,255, " (bt: "})
+                table.insert(parts, {hr, hg, hb, bt_tick})
+                table.insert(parts, {255,255,255, ")"})
+                if advanced and tonumber(spread) and tonumber(spread) > 0 then
+                    table.insert(parts, {255,255,255, " (spread: "})
+                    table.insert(parts, {hr, hg, hb, spread .. "°"})
+                    table.insert(parts, {255,255,255, ")"})
+                end
+
+                console_print_segments(unpack(parts))
+                pcall(function()
+                    local key_base = tostring(tbl.getstate(false, false, 0, false)) -- fallback
+                    -- find any stats with a recent last_choice for active states
+                    for key, s in pairs(localdb.auto_rand_stats or {}) do
+                        if s._last_choice_at and (globals.realtime() - s._last_choice_at) <= 3.0 then
+                            ar_record_result(key, s._last_choice or 0, true)
+                        end
                     end
                 end)
+            end)
 
-                client.set_event_callback("player_hurt", function(e)
-                        local victim = client.userid_to_entindex(e.userid)
-                        local local_player = entity.get_local_player()
-                        if victim ~= local_player then return end
-                    end)
-                    
-                client.set_event_callback("aim_fire", function(shot)
-                    local now_tick = globals.tickcount()
-                    local shot_tick = shot.tick or now_tick
-                    shot.backtrack = math.max(0, now_tick - shot_tick)
-                    shot.backtrack = math.floor(shot.backtrack + 0.5)
-                    tbl.shot_choke = tbl.shot_choke or {
-                        enabled = true,          
-                        active = false,          
-                        remaining = 0,            
-                        desired_ticks = 3,       
-                        max_ticks = 8,           
-                        last_shot_tick = 0
-                    }     
-                    fired_shots[shot.id] = { fired = shot, spread = 0 }
+            client.set_event_callback("aim_miss", function(shot)
+                if not logs_enabled("miss") then return end
+                local target_name = entity.get_player_name(shot.target) or "?"
+                local hitgroup_name = hitboxes[shot.hitgroup] or "?"
+                local wanted_hitgroup = hitboxes[(shot.aim_hitbox or shot.hitgroup)] or "?"
+                local wanted_dmg = shot.damage or 0
+                local reason = shot.reason or "?"
+                local hit_chance = ("%.0f"):format(shot.hit_chance or 0)
+                local spread = ("%.1f"):format(shot.spread or 0)
+
+                local fired_entry = fired_shots[shot.id]
+                local last_imp = bullet_impacts[#bullet_impacts]
+                local fired = fired_entry and fired_entry.fired
+                local now_tick = globals.tickcount()
+
+                if last_imp and fired and last_imp.tick == now_tick then
+                    local a1 = (last_imp.origin - vector(fired.x, fired.y, fired.z)):angles()
+                    local a2 = (last_imp.origin - last_imp.shot):angles()
+                    fired_entry.spread = vector(a1 - a2):length2d()
+                end
+
+                local bt_tick = fired and fired.backtrack or 0
+                bt_tick = math.floor(bt_tick + 0.5)
+                local bt_time = totime(bt_tick)
+
+                local mr, mg, mb = 255, 255, 255
+                local br, bg, bb = 255, 255, 255
+                local gr, gg, gb = ui.get(menu["visuals & misc"]["visuals"]["watermark_color"])
+                local sr, sg, sb = 255, 255, 255
+                local use_hit_clr = false
+                local advanced = logs_enabled("advanced")
+
+                local parts = {}
+                table.insert(parts, {br, bg, bb, "["})
+                table.insert(parts, {gr, gg, gb, "Lua"})
+                table.insert(parts, {sr, sg, sb, "Sense"})
+                table.insert(parts, {br, bg, bb, "] "})
+
+                table.insert(parts, { use_hit_clr and hr or mr, use_hit_clr and hg or mg, use_hit_clr and hb or mb, "Missed" })
+                table.insert(parts, {255,255,255, " shot at "})
+                table.insert(parts, { use_hit_clr and hr or mr, use_hit_clr and hg or mg, use_hit_clr and hb or mb, target_name })
+                table.insert(parts, {255,255,255, "'s "})
+                table.insert(parts, { use_hit_clr and hr or mr, use_hit_clr and hg or mg, use_hit_clr and hb or mb, hitgroup_name })
+                table.insert(parts, {255,255,255, " due to "})
+                table.insert(parts, { use_hit_clr and hr or mr, use_hit_clr and hg or mg, use_hit_clr and hb or mb, reason })
+                table.insert(parts, {255,255,255, " "})
+                table.insert(parts, {255,255,255, "(hc: "})
+                table.insert(parts, { use_hit_clr and hr or mr, use_hit_clr and hg or mg, use_hit_clr and hb or mb, hit_chance .. "%" })
+                table.insert(parts, {255,255,255, ")"})
+                table.insert(parts, {255,255,255, " (damage: "})
+                table.insert(parts, { use_hit_clr and hr or mr, use_hit_clr and hg or mg, use_hit_clr and hb or mb, tostring(wanted_dmg)})
+                table.insert(parts, {255,255,255, ")"})
+                table.insert(parts, {255,255,255, " (bt: "})
+                table.insert(parts, { use_hit_clr and hr or mr, use_hit_clr and hg or mg, use_hit_clr and hb or mb, bt_tick })
+                table.insert(parts, {255,255,255, ")"})
+                if advanced and tonumber(spread) and tonumber(spread) > 0 then
+                    table.insert(parts, {255,255,255, " (spread: "})
+                    table.insert(parts, { use_hit_clr and hr or mr, use_hit_clr and hg or mg, use_hit_clr and hb or mb, spread .. "°"})
+                    table.insert(parts, {255,255,255, ")"})
+                end
+
+                console_print_segments(unpack(parts))
+            end)
+
+            client.set_event_callback("player_hurt", function(e)
+                    local victim = client.userid_to_entindex(e.userid)
+                    local local_player = entity.get_local_player()
+                    if victim ~= local_player then return end
                     pcall(function()
-                    local lp = entity.get_local_player()
-                    local shooter = client.userid_to_entindex(shot.userid)
-                    if shooter ~= nil and lp == shooter and tbl.shot_choke and tbl.shot_choke.enabled then
-                        local wp = entity.get_player_weapon(lp)
-                        local cname = wp and entity.get_classname(wp) or ""
-                        if cname and (cname:find("Knife") or cname:find("Taser") or cname == "CC4" or cname:lower():find("grenade")) then
-                            return
-                        end
-
-                        local desired = math.max(1, math.min(tbl.shot_choke.max_ticks, tbl.shot_choke.desired_ticks or 3))
-                        local target = shot.target
-                        if not target then
-                            target = client.current_threat()
-                        end
-                        if target then
-                            local sid = tostring(entity.get_steam64(target) or target)
-                            local fak = tbl.antiaim.ab and tbl.antiaim.ab.fakelimit and tbl.antiaim.ab.fakelimit[sid]
-                            local dly = tbl.antiaim.ab and tbl.antiaim.ab.delay and tbl.antiaim.ab.delay[sid]
-                            if type(fak) == "number" and fak > 0 then
-                                desired = math.max(1, math.min(tbl.shot_choke.max_ticks, math.floor(fak)))
+                        for key, s in pairs(localdb.auto_rand_stats or {}) do
+                            if s._last_choice_at and (globals.realtime() - s._last_choice_at) <= 3.0 then
+                                ar_record_result(key, s._last_choice or 0, false)
                             end
-                            if type(dly) == "number" then
-                                tbl.shot_choke.start_delay = math.max(0, math.floor(dly))
-                            end
-                        end
-
-                        if math.random() < 0.25 then desired = math.max(1, desired - 1) end
-
-                        tbl.shot_choke.active = true
-                        tbl.shot_choke.remaining = math.max(tbl.shot_choke.remaining, desired)
-                        tbl.shot_choke.last_shot_tick = globals.tickcount()
-                        tbl.shot_choke.start_delay = tbl.shot_choke.start_delay or 0
-                        tbl.shot_choke._seed_target = target and tostring(target) or nil
-                            pcall(function()
-                                local lp = entity.get_local_player()
-                                if not lp then return end
-                                local flags = entity.get_prop(lp, "m_fFlags") or 0
-                                local air = bit.band(flags, 1) == 0
-                                local duck = (entity.get_prop(lp, "m_flDuckAmount") or 0) > 0.1
-                                local xv, yv, zv = entity.get_prop(lp, "m_vecVelocity")
-                                local speed = math.sqrt((xv or 0)^2 + (yv or 0)^2 + (zv or 0)^2)
-                                local state = tbl.getstate(air, duck, speed, false) or "global"
-                                local team = (entity.get_prop(lp, "m_iTeamNum") == 2) and "t" or "ct"
-                                local menutbl = aa[state] and aa[state][team] and aa[state][team]["auto"]
-                            if menutbl and pcall(ui.get, menutbl["breaklc"]) and ui.get(menutbl["breaklc"]) then
-                                tbl.breaklc = tbl.breaklc or {}
-                                local safe_ui = function(ref) local ok,v = pcall(ui.get, ref); return ok and v end
-                                local dt_on = safe_ui(tbl.refs.dt and tbl.refs.dt[1]) and safe_ui(tbl.refs.dt and tbl.refs.dt[2])
-                                local hs_on = safe_ui(tbl.refs.hide and tbl.refs.hide[1]) and safe_ui(tbl.refs.hide and tbl.refs.hide[2])
-                                local exploit_enabled = dt_on or hs_on
-
-                            end
-                            end)
                         end
                     end)
                 end)
-    client.set_event_callback("aim_hit", function(shot)
-        if not logs_enabled("hit") then return end
-        
-        -- Add safety check for shot.target
-        if not shot.target then return end
-        
-        local target_name = entity.get_player_name(shot.target) or "Unknown"
-        local target_hp = entity.get_prop(shot.target, "m_iHealth") or 0
-        
-        -- Safety check for hitgroup
-        local hitgroup_name = hitboxes[shot.hitgroup] or "body"
-        local wanted_hitgroup = hitboxes[shot.aim_hitbox or shot.hitgroup] or "body"
-        
-        local dmg = shot.damage or 0
-        local wanted_dmg = shot.damage or 0
-        
-        local fired_entry = fired_shots[shot.id]
-        local last_imp = bullet_impacts[#bullet_impacts]
-        local fired = fired_entry and fired_entry.fired
-        local now_tick = globals.tickcount()
-
-        -- Calculate spread
-        if last_imp and fired and last_imp.tick == now_tick then
-            pcall(function()
-                local a1 = (last_imp.origin - vector(fired.x, fired.y, fired.z)):angles()
-                local a2 = (last_imp.origin - last_imp.shot):angles()
-                fired_entry.spread = vector(a1 - a2):length2d()
-            end)
-        end
-
-        local bt_tick = fired and fired.backtrack or 0
-        bt_tick = math.floor(bt_tick + 0.5)
-        local spread = fired_entry and fired_entry.spread or 0
-
-        local br, bg, bb = 255, 255, 255
-        local gr, gg, gb = ui.get(menu["visuals & misc"]["visuals"]["watermark_color"])
-        local sr, sg, sb = 255, 255, 255
-        local hr, hg, hb = ui.get(menu["visuals & misc"]["visuals"]["watermark_color"])
-
-        local advanced = logs_enabled("advanced")
-
-        local parts = {}
-        table.insert(parts, {br, bg, bb, "["})
-        table.insert(parts, {gr, gg, gb, "Lua"})
-        table.insert(parts, {sr, sg, sb, "Sense"})
-        table.insert(parts, {br, bg, bb, "] "})
-        table.insert(parts, {hr, hg, hb, "Hit"})
-        table.insert(parts, {255, 255, 255, " " .. target_name})
-        table.insert(parts, {255, 255, 255, "'s "})
-        table.insert(parts, {hr, hg, hb, hitgroup_name})
-        table.insert(parts, {255, 255, 255, " for "})
-        table.insert(parts, {hr, hg, hb, tostring(dmg)})
-        table.insert(parts, {255, 255, 255, " damage (hp: "})
-        table.insert(parts, {hr, hg, hb, tostring(target_hp)})
-        table.insert(parts, {255, 255, 255, ") (bt: "})
-        table.insert(parts, {hr, hg, hb, tostring(bt_tick)})
-        table.insert(parts, {255, 255, 255, ")"})
-        
-        if advanced and spread and spread > 0 then
-            table.insert(parts, {255, 255, 255, " (spread: "})
-            table.insert(parts, {hr, hg, hb, string.format("%.1f°", spread)})
-            table.insert(parts, {255, 255, 255, ")"})
-        end
-
-        console_print_segments(unpack(parts))
-    end)
-
-    client.set_event_callback("aim_miss", function(shot)
-        if not logs_enabled("miss") then return end
-        
-        -- Add safety check
-        if not shot.target then return end
-        
-        local target_name = entity.get_player_name(shot.target) or "Unknown"
-        local hitgroup_name = hitboxes[shot.hitgroup] or "body"
-        local reason = shot.reason or "unknown"
-        local hit_chance = shot.hit_chance or 0
-        
-        local fired_entry = fired_shots[shot.id]
-        local last_imp = bullet_impacts[#bullet_impacts]
-        local fired = fired_entry and fired_entry.fired
-        local now_tick = globals.tickcount()
-
-        -- Calculate spread
-        if last_imp and fired and last_imp.tick == now_tick then
-            pcall(function()
-                local a1 = (last_imp.origin - vector(fired.x, fired.y, fired.z)):angles()
-                local a2 = (last_imp.origin - last_imp.shot):angles()
-                fired_entry.spread = vector(a1 - a2):length2d()
-            end)
-        end
-
-        local bt_tick = fired and fired.backtrack or 0
-        bt_tick = math.floor(bt_tick + 0.5)
-        local spread = fired_entry and fired_entry.spread or 0
-
-        local mr, mg, mb = 255, 255, 255
-        local br, bg, bb = 255, 255, 255
-        local gr, gg, gb = ui.get(menu["visuals & misc"]["visuals"]["watermark_color"])
-        local sr, sg, sb = 255, 255, 255
-        local hr, hg, hb = ui.get(menu["visuals & misc"]["visuals"]["watermark_color"])
-
-        local advanced = logs_enabled("advanced")
-
-        local parts = {}
-        table.insert(parts, {br, bg, bb, "["})
-        table.insert(parts, {gr, gg, gb, "Lua"})
-        table.insert(parts, {sr, sg, sb, "Sense"})
-        table.insert(parts, {br, bg, bb, "] "})
-        table.insert(parts, {mr, mg, mb, "Missed"})
-        table.insert(parts, {255, 255, 255, " " .. target_name})
-        table.insert(parts, {255, 255, 255, "'s "})
-        table.insert(parts, {mr, mg, mb, hitgroup_name})
-        table.insert(parts, {255, 255, 255, " due to "})
-        table.insert(parts, {mr, mg, mb, reason})
-        table.insert(parts, {255, 255, 255, " (hc: "})
-        table.insert(parts, {mr, mg, mb, string.format("%.0f%%", hit_chance)})
-        table.insert(parts, {255, 255, 255, ") (bt: "})
-        table.insert(parts, {mr, mg, mb, tostring(bt_tick)})
-        table.insert(parts, {255, 255, 255, ")"})
-        
-        if advanced and spread and spread > 0 then
-            table.insert(parts, {255, 255, 255, " (spread: "})
-            table.insert(parts, {mr, mg, mb, string.format("%.1f°", spread)})
-            table.insert(parts, {255, 255, 255, ")"})
-        end
-
-        console_print_segments(unpack(parts))
-    end)                
-                client.set_event_callback("item_purchase", function(e)
-                    if not logs_enabled("buy") then return end
-                    local idx = client.userid_to_entindex(e.userid)
-                    if not idx then return end
-                    local player = c_entity.new(idx)
-                    local name = player:get_player_name() or "?"
-                    local weapon = (e.weapon or ""):lower()
-
-                    local br, bg, bb = 255, 255, 255
-                    local gr, gg, gb = ui.get(menu["visuals & misc"]["visuals"]["watermark_color"])
-                    local sr, sg, sb = 255, 255, 255
-                    local buyr, buyg, buyb = 255,255,255
-
-                    local parts = {}
-                    table.insert(parts, {br, bg, bb, "["})
-                    table.insert(parts, {gr, gg, gb, "Lua"})
-                    table.insert(parts, {sr, sg, sb, "Sense"})
-                    table.insert(parts, {br, bg, bb, "] "})
-                    table.insert(parts, {buyr, buyg, buyb, name .. " bought "})
-                    table.insert(parts, {255,255,255, weapon})
-                    console_print_segments(unpack(parts))
-                end)
-
-        
+            end     
 
         end)({
             ref = function(a,b,c) return { ui.reference(a,b,c) } end,
