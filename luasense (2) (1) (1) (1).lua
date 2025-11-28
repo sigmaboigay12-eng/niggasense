@@ -224,7 +224,7 @@
                     name = name,
                     author = username,
                     timestamp = client.system_time(),
-                    date = os.date("%Y-%m-%d %H:%M:%S"),
+                    date = username,
                     version = "luasense_v2"
                 }
                 
@@ -6291,12 +6291,32 @@
         local function adaptive_bruteforce(ent, data)
             local now = globals.realtime()
             
+            -- Check AA type first
+            if data.aa_type.detected == "jitter" and data.aa_type.confidence > 0.5 then
+                -- For jitter AA: use faster cycling and counter-prediction
+                local body_sign = data.body.current > 0 and 1 or -1
+                local tick_phase = globals.tickcount() % 4
+                
+                -- Rapid switching for jitter
+                if now - data.brute.last_switch > 0.15 then
+                    data.brute.last_switch = now
+                    
+                    -- Counter the body yaw with some randomization
+                    local base_prediction = body_sign > 0 and -58 or 58
+                    local jitter_offset = client.random_int(-10, 10)
+                    
+                    return func.fclamp(base_prediction + jitter_offset, -60, 60), 0.65
+                end
+                
+                return data.override.value, 0.55
+            end
             
+            -- Lock behavior for non-jitter
             if data.brute.locked and data.brute.consecutive_hits >= 2 and data.brute.lock_confidence > 0.75 then
                 return data.brute.lock_side, math.min(0.95, data.brute.lock_confidence + 0.1)
             end
             
-            
+            -- Standard bruteforce for other AA types
             local all_phases = {}
             local all_weights = {}
             
@@ -6309,11 +6329,10 @@
             
             for _, phase in ipairs(data.brute.custom_phases) do
                 table.insert(all_phases, phase)
-                table.insert(all_weights, 1.5)  
+                table.insert(all_weights, 1.5)
             end
             
             if #all_phases == 0 then
-                
                 data.brute.exhausted_phases = {}
                 all_phases = data.brute.base_phases
                 for i = 1, #all_phases do
@@ -6321,17 +6340,15 @@
                 end
             end
             
-            
+            -- Faster cycling on misses
             local cycle_delay = data.brute.cycle_speed
             if data.brute.consecutive_misses >= 2 then
-                cycle_delay = math.max(0.15, cycle_delay * 0.5)  
+                cycle_delay = math.max(0.1, cycle_delay * 0.4)
             elseif data.brute.consecutive_hits >= 1 then
-                cycle_delay = math.min(1.5, cycle_delay * 1.5)  
+                cycle_delay = math.min(1.5, cycle_delay * 1.5)
             end
             
-            
             if now - data.brute.last_switch > cycle_delay then
-                
                 local normalized_weights = softmax(all_weights)
                 local selected_phase, selected_idx = weighted_random_select(all_phases, normalized_weights)
                 
@@ -6340,7 +6357,6 @@
                 
                 return selected_phase, 0.40 + (normalized_weights[selected_idx] or 0) * 0.3
             end
-            
             
             local current_phase = all_phases[data.brute.phase] or all_phases[1] or 0
             return current_phase, 0.35
@@ -6764,15 +6780,138 @@
             return 0, 0
         end
 
+        local function analyze_jitter_pattern(data)
+            local result = {
+                predictable = false,
+                next_side = 0,
+                pattern_type = "random",
+                confidence = 0
+            }
+            
+            if #data.body.history < 10 then
+                return result
+            end
+            
+            -- Analyze sign changes
+            local signs = {}
+            for i = 1, #data.body.history do
+                table.insert(signs, data.body.history[i].yaw > 0 and 1 or -1)
+            end
+            
+            -- Check for alternating pattern (most common jitter)
+            local alternating_count = 0
+            for i = 2, #signs do
+                if signs[i] ~= signs[i-1] then
+                    alternating_count = alternating_count + 1
+                end
+            end
+            
+            local alternating_ratio = alternating_count / (#signs - 1)
+            
+            if alternating_ratio > 0.7 then
+                -- Highly alternating = predict opposite of current
+                result.predictable = true
+                result.pattern_type = "alternating"
+                result.next_side = signs[#signs] > 0 and -58 or 58
+                result.confidence = alternating_ratio
+                return result
+            end
+            
+            -- Check for 2-tick pattern (left-left-right-right)
+            local two_tick_matches = 0
+            local two_tick_total = 0
+            
+            for i = 3, #signs do
+                two_tick_total = two_tick_total + 1
+                if signs[i] == signs[i-1] and signs[i] ~= signs[i-2] then
+                    two_tick_matches = two_tick_matches + 1
+                end
+            end
+            
+            if two_tick_total > 5 and two_tick_matches / two_tick_total > 0.6 then
+                result.predictable = true
+                result.pattern_type = "two_tick"
+                
+                -- Predict based on whether we're in first or second tick of pattern
+                if signs[#signs] == signs[#signs - 1] then
+                    result.next_side = signs[#signs] > 0 and -58 or 58
+                else
+                    result.next_side = signs[#signs] > 0 and 58 or -58
+                end
+                result.confidence = two_tick_matches / two_tick_total
+                return result
+            end
+            
+            -- Check for random jitter (just counter body yaw)
+            result.pattern_type = "random"
+            result.next_side = signs[#signs] > 0 and -58 or 58
+            result.confidence = 0.55
+            
+            return result
+        end
 
         local function detect_aa_type(ent, data)
             local characteristics = {}
             
+            -- Calculate jitter metrics more accurately
+            local jitter_score = 0
+            local static_score = 0
+            local flip_score = 0
+            local oscillation_score = 0
             
-            local static_score = data.body.static_ticks / 20
-            local flip_score = data.angles.flip_detected and 1 or 0
-            local jitter_score = data.movement.jitter_detected and 1 or 0
-            local oscillation_score = data.body.oscillation_period > 0 and 1 or 0
+            -- Enhanced jitter detection from yaw deltas
+            if #data.angles.yaw_deltas >= 5 then
+                local rapid_changes = 0
+                local small_jitters = 0
+                local large_flips = 0
+                
+                for i, delta in ipairs(data.angles.yaw_deltas) do
+                    if delta > 5 and delta < 25 then
+                        small_jitters = small_jitters + 1
+                    elseif delta >= 25 and delta < 60 then
+                        rapid_changes = rapid_changes + 1
+                    elseif delta >= 60 then
+                        large_flips = large_flips + 1
+                    end
+                end
+                
+                local total = #data.angles.yaw_deltas
+                jitter_score = (small_jitters + rapid_changes * 1.5) / total
+                flip_score = large_flips / total
+            end
+            
+            -- Body yaw analysis for jitter
+            if #data.body.history >= 8 then
+                local body_changes = 0
+                local body_jitter_sum = 0
+                
+                for i = 2, #data.body.history do
+                    local delta = math.abs(data.body.history[i].yaw - data.body.history[i-1].yaw)
+                    if delta > 3 then
+                        body_changes = body_changes + 1
+                        body_jitter_sum = body_jitter_sum + delta
+                    end
+                end
+                
+                local avg_body_jitter = body_jitter_sum / math.max(1, body_changes)
+                
+                -- High frequency small changes = jitter
+                if body_changes > #data.body.history * 0.5 and avg_body_jitter < 40 then
+                    jitter_score = math.max(jitter_score, 0.8)
+                end
+            end
+            
+            -- Static detection
+            static_score = math.min(1, data.body.static_ticks / 20)
+            
+            -- Oscillation detection
+            oscillation_score = data.body.oscillation_period > 0 and 
+                math.min(1, 0.5 / data.body.oscillation_period) or 0
+            
+            -- Movement-based jitter detection
+            if data.movement.jitter_detected then
+                jitter_score = math.max(jitter_score, 0.75)
+            end
             
             characteristics.static = static_score
             characteristics.flip = flip_score
@@ -6781,22 +6920,24 @@
             
             data.aa_type.characteristics = characteristics
             
-            
+            -- Determine AA type with priority for jitter
             local max_score = 0
             local detected_type = "unknown"
             
-            if static_score > max_score then
+            -- Jitter has priority if score is high enough
+            if jitter_score > 0.5 then
+                max_score = jitter_score
+                detected_type = "jitter"
+            elseif static_score > max_score then
                 max_score = static_score
                 detected_type = "static"
             end
-            if flip_score > max_score then
+            
+            if flip_score > max_score and flip_score > 0.4 then
                 max_score = flip_score
                 detected_type = "desync_flip"
             end
-            if jitter_score > max_score then
-                max_score = jitter_score
-                detected_type = "jitter"
-            end
+            
             if oscillation_score > max_score then
                 max_score = oscillation_score
                 detected_type = "oscillation"
@@ -6805,16 +6946,48 @@
             data.aa_type.detected = detected_type
             data.aa_type.confidence = max_score
             
-            
-            if detected_type == "static" then
-                return data.body.current > 0 and 58 or -58, 0.75
+            -- Return prediction based on AA type
+            if detected_type == "jitter" then
+                -- For jitter: use tick-based prediction with body yaw consideration
+                local tick = globals.tickcount()
+                local body_sign = data.body.current > 0 and 1 or -1
+                
+                -- Analyze jitter pattern
+                local jitter_pattern = analyze_jitter_pattern(data)
+                
+                if jitter_pattern.predictable then
+                    return jitter_pattern.next_side, 0.75
+                else
+                    -- Use weighted random based on recent success
+                    local left_weight = 1.0
+                    local right_weight = 1.0
+                    
+                    for i = math.max(1, #data.shots - 5), #data.shots do
+                        local shot = data.shots[i]
+                        if shot and shot.hit then
+                            if shot.predicted_side > 0 then
+                                right_weight = right_weight + 0.3
+                            else
+                                left_weight = left_weight + 0.3
+                            end
+                        end
+                    end
+                    
+                    -- Counter the body yaw for jitter
+                    local prediction = body_sign > 0 and -58 or 58
+                    local confidence = 0.60 + (jitter_score * 0.15)
+                    
+                    return prediction, confidence
+                end
+                
+            elseif detected_type == "static" then
+                return data.body.current > 0 and 58 or -58, 0.80
+                
             elseif detected_type == "desync_flip" then
-                return data.body.current > 0 and -58 or 58, 0.70
-            elseif detected_type == "jitter" then
-                local tick_phase = globals.tickcount() % 4
-                return tick_phase < 2 and 58 or -58, 0.65
+                return data.body.current > 0 and -58 or 58, 0.72
+                
             elseif detected_type == "oscillation" then
-                return data.body.predicted_next, 0.72
+                return data.body.predicted_next, 0.70
             end
             
             return 0, 0
