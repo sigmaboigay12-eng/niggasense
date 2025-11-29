@@ -2253,7 +2253,1851 @@
                 auto_rand_cache = {},
                 autohs_active = false   
                 }
+tbl.jitter_system = {
+    
+    sync = {
+        last_desync_side = 0,
+        last_jitter_phase = 0,
+        sync_offset = 0,
+        transition_tick = 0
+    },
+    
+    
+    adaptive = {
+        base_amplitude = 0,
+        current_amplitude = 0,
+        distance_factor = 1.0,
+        weapon_factor = 1.0,
+        threat_factor = 1.0
+    },
+    
+    
+    phase = {
+        current_phase = 0,
+        phase_offset = 0,
+        last_randomize = 0,
+        randomize_interval = 0.15,
+        entropy_pool = {}
+    },
+    
+    
+    speed = {
+        base_speed = 1.0,
+        current_speed = 1.0,
+        threat_multiplier = 1.0,
+        last_update = 0
+    }
+}
 
+
+local function sync_jitter_with_desync(cmd, data, current_desync_side)
+    local js = tbl.jitter_system
+    local tick = globals.tickcount()
+    
+    
+    local desync_changed = (current_desync_side > 0) ~= (js.sync.last_desync_side > 0)
+    
+    if desync_changed then
+        
+        js.sync.transition_tick = tick
+        
+        
+        if current_desync_side > 0 then
+            js.sync.sync_offset = client.random_int(0, 3)
+        else
+            js.sync.sync_offset = client.random_int(2, 5)
+        end
+        
+        
+        js.sync.last_jitter_phase = 1 - js.sync.last_jitter_phase
+    end
+    
+    js.sync.last_desync_side = current_desync_side
+    
+    
+    local ticks_since_transition = tick - js.sync.transition_tick
+    local sync_phase = (ticks_since_transition + js.sync.sync_offset) % 8
+    
+    return sync_phase, desync_changed
+end
+
+
+local function calculate_adaptive_jitter_range(ent, base_jitter)
+    local js = tbl.jitter_system
+    local lp = entity.get_local_player()
+    if not lp then return base_jitter end
+    
+    
+    local distance = 500
+    local ex, ey, ez = entity.get_prop(ent or lp, "m_vecOrigin")
+    local lx, ly, lz = entity.get_prop(lp, "m_vecOrigin")
+    
+    if ex and lx then
+        distance = math.sqrt((ex-lx)^2 + (ey-ly)^2 + (ez-lz)^2)
+    end
+    
+    
+    local dist_factor = 1.0
+    if distance < 300 then
+        
+        dist_factor = 0.65 + (distance / 300) * 0.35
+    elseif distance > 800 then
+        
+        dist_factor = 1.0 + math.min(0.4, (distance - 800) / 1000)
+    end
+    
+    
+    local weapon_factor = 1.0
+    local enemy = ent or client.current_threat()
+    
+    if enemy then
+        local enemy_weapon = entity.get_player_weapon(enemy)
+        if enemy_weapon then
+            local classname = entity.get_classname(enemy_weapon) or ""
+            classname = classname:lower()
+            
+            if classname:find("awp") then
+                
+                weapon_factor = 1.35
+            elseif classname:find("ssg08") then
+                
+                weapon_factor = 1.25
+            elseif classname:find("deagle") then
+                
+                weapon_factor = 1.15
+            elseif classname:find("knife") then
+                
+                weapon_factor = 0.5
+            elseif classname:find("pistol") or classname:find("glock") or 
+                   classname:find("usp") or classname:find("p250") then
+                
+                weapon_factor = 1.0
+            elseif classname:find("rifle") or classname:find("ak47") or 
+                   classname:find("m4a") then
+                
+                weapon_factor = 1.10
+            end
+        end
+    end
+    
+    
+    js.adaptive.distance_factor = dist_factor
+    js.adaptive.weapon_factor = weapon_factor
+    js.adaptive.base_amplitude = base_jitter
+    
+    
+    local adaptive_amplitude = base_jitter * dist_factor * weapon_factor
+    
+    
+    adaptive_amplitude = func.fclamp(adaptive_amplitude, base_jitter * 0.5, base_jitter * 1.5)
+    
+    js.adaptive.current_amplitude = adaptive_amplitude
+    
+    return adaptive_amplitude
+end
+
+
+local function randomize_jitter_phase(cmd)
+    local js = tbl.jitter_system
+    local now = globals.realtime()
+    local tick = cmd.command_number
+    
+    
+    if now - js.phase.last_randomize >= js.phase.randomize_interval then
+        js.phase.last_randomize = now
+        
+        
+        table.insert(js.phase.entropy_pool, {
+            time = now,
+            tick = tick % 256,
+            rand = client.random_int(0, 255),
+            latency = math.floor(client.latency() * 1000) % 100
+        })
+        
+        
+        while #js.phase.entropy_pool > 8 do
+            table.remove(js.phase.entropy_pool, 1)
+        end
+        
+        
+        local entropy_sum = 0
+        for _, e in ipairs(js.phase.entropy_pool) do
+            entropy_sum = entropy_sum + e.rand + e.tick + e.latency
+        end
+        
+        
+        js.phase.randomize_interval = 0.1 + (entropy_sum % 150) / 1000
+        
+        
+        js.phase.phase_offset = entropy_sum % 8
+    end
+    
+    
+    local randomized_phase = (tick + js.phase.phase_offset) % 16
+    
+    
+    local micro_offset = 0
+    if tick % 7 == 0 then
+        micro_offset = client.random_int(-1, 1)
+    end
+    
+    js.phase.current_phase = (randomized_phase + micro_offset) % 16
+    
+    return js.phase.current_phase
+end
+
+
+local function modulate_jitter_speed(base_delay)
+    local js = tbl.jitter_system
+    local now = globals.realtime()
+    
+    
+    local threat_level = 0.5  
+    local enemy = client.current_threat()
+    
+    if enemy and entity.is_alive(enemy) then
+        local lp = entity.get_local_player()
+        if lp then
+            
+            local ex, ey, ez = entity.get_prop(enemy, "m_vecOrigin")
+            local lx, ly, lz = entity.get_prop(lp, "m_vecOrigin")
+            
+            if ex and lx then
+                local distance = math.sqrt((ex-lx)^2 + (ey-ly)^2 + (ez-lz)^2)
+                
+                
+                if distance < 300 then
+                    threat_level = 0.9
+                elseif distance < 500 then
+                    threat_level = 0.7
+                elseif distance < 800 then
+                    threat_level = 0.5
+                else
+                    threat_level = 0.3
+                end
+            end
+            
+            
+            local vx, vy = entity.get_prop(enemy, "m_vecVelocity")
+            if vx then
+                local velocity = math.sqrt(vx*vx + vy*vy)
+                if velocity > 200 then
+                    threat_level = threat_level * 0.8
+                elseif velocity < 20 then
+                    threat_level = threat_level * 1.15
+                end
+            end
+            
+            
+            local enemy_weapon = entity.get_player_weapon(enemy)
+            if enemy_weapon then
+                local classname = entity.get_classname(enemy_weapon) or ""
+                if classname:lower():find("awp") then
+                    threat_level = math.min(1.0, threat_level * 1.3)
+                elseif classname:lower():find("knife") then
+                    threat_level = threat_level * 0.5
+                end
+            end
+            
+            
+            local is_scoped = (entity.get_prop(enemy, "m_bIsScoped") or 0) ~= 0
+            if is_scoped then
+                threat_level = math.min(1.0, threat_level * 1.25)
+            end
+        end
+    end
+    
+    
+    local alpha = 0.15
+    js.speed.threat_multiplier = js.speed.threat_multiplier * (1 - alpha) + threat_level * alpha
+    
+    
+    
+    local speed_modifier = 1.0
+    
+    if js.speed.threat_multiplier > 0.7 then
+        
+        speed_modifier = 0.6 + (1.0 - js.speed.threat_multiplier) * 0.67
+    elseif js.speed.threat_multiplier < 0.4 then
+        
+        speed_modifier = 1.1 + (0.4 - js.speed.threat_multiplier) * 0.5
+    end
+    
+    
+    local variation = 1.0 + (client.random_int(-10, 10) / 100)
+    speed_modifier = speed_modifier * variation
+    
+    
+    speed_modifier = func.fclamp(speed_modifier, 0.5, 1.5)
+    
+    js.speed.current_speed = speed_modifier
+    js.speed.last_update = now
+    
+    
+    local modulated_delay = math.max(1, math.floor(base_delay * speed_modifier + 0.5))
+    
+    return modulated_delay, js.speed.threat_multiplier
+end
+
+
+
+local function apply_enhanced_jitter(cmd, data, base_jitter_value, current_desync_side)
+    local js = tbl.jitter_system
+    local enemy = client.current_threat()
+    
+    
+    local sync_phase, desync_changed = sync_jitter_with_desync(cmd, data, current_desync_side)
+    
+    
+    local adaptive_amplitude = calculate_adaptive_jitter_range(enemy, base_jitter_value)
+    
+    
+    local random_phase = randomize_jitter_phase(cmd)
+    
+    
+    local speed_modifier, threat_level = modulate_jitter_speed(1)
+    
+    
+    local combined_phase = (sync_phase + random_phase) % 16
+    
+    
+    local jitter_direction = (combined_phase % 2 == 0) and 1 or -1
+    
+    
+    local threat_amplitude_scale = 0.85 + threat_level * 0.3
+    local final_amplitude = adaptive_amplitude * threat_amplitude_scale
+    
+    
+    if desync_changed and client.random_int(1, 100) > 60 then
+        jitter_direction = -jitter_direction
+    end
+    
+    local final_jitter = final_amplitude * jitter_direction
+    
+    
+    js.last_result = {
+        base = base_jitter_value,
+        adaptive = adaptive_amplitude,
+        final = final_jitter,
+        sync_phase = sync_phase,
+        random_phase = random_phase,
+        threat = threat_level,
+        speed_mod = speed_modifier,
+        desync_changed = desync_changed
+    }
+    
+    return final_jitter, speed_modifier
+end
+
+
+tbl.apply_enhanced_jitter = apply_enhanced_jitter
+tbl.sync_jitter_with_desync = sync_jitter_with_desync
+tbl.calculate_adaptive_jitter_range = calculate_adaptive_jitter_range
+tbl.randomize_jitter_phase = randomize_jitter_phase
+tbl.modulate_jitter_speed = modulate_jitter_speed
+
+tbl.desync_system = {
+    
+    variation = {
+        base_desync = 60,
+        current_desync = 60,
+        variation_range = 15,
+        variation_speed = 0.08,
+        last_variation_time = 0,
+        variation_phase = 0,
+        pattern = "smooth" 
+    },
+    
+    
+    on_shot = {
+        enabled = true,
+        last_shot_tick = 0,
+        pre_shot_side = 0,
+        flip_duration_ticks = 8,
+        should_flip = false,
+        flip_until_tick = 0
+    },
+    
+    
+    velocity = {
+        current_speed = 0,
+        max_speed = 250,
+        min_desync_mult = 0.65,
+        max_desync_mult = 1.0,
+        smoothed_mult = 1.0,
+        standing_bonus = 1.15,
+        air_penalty = 0.80
+    },
+    
+    
+    lean = {
+        current_lean = 0,
+        lean_threshold = 0.15,
+        lean_desync_offset = 0,
+        lean_history = {},
+        lean_prediction = 0
+    },
+    
+    
+    output = {
+        final_desync = 60,
+        final_side = 1,
+        confidence = 1.0
+    }
+}
+
+
+local function calculate_desync_variation(base_desync)
+    local ds = tbl.desync_system
+    local now = globals.realtime()
+    local tick = globals.tickcount()
+    
+    
+    local dt = now - ds.variation.last_variation_time
+    ds.variation.last_variation_time = now
+    
+    
+    ds.variation.variation_phase = ds.variation.variation_phase + dt * ds.variation.variation_speed * 10
+    
+    local variation_amount = 0
+    
+    if ds.variation.pattern == "smooth" then
+        
+        variation_amount = math.sin(ds.variation.variation_phase) * ds.variation.variation_range
+        
+        
+        variation_amount = variation_amount + math.sin(ds.variation.variation_phase * 1.7) * (ds.variation.variation_range * 0.3)
+        
+    elseif ds.variation.pattern == "stepped" then
+        
+        local step_phase = math.floor(ds.variation.variation_phase) % 4
+        local step_values = {0, ds.variation.variation_range * 0.5, ds.variation.variation_range, ds.variation.variation_range * 0.5}
+        variation_amount = step_values[step_phase + 1] or 0
+        
+        
+        local step_progress = ds.variation.variation_phase % 1
+        local next_step = (step_phase + 1) % 4
+        local next_value = step_values[next_step + 1] or 0
+        variation_amount = variation_amount * (1 - step_progress) + next_value * step_progress
+        
+    elseif ds.variation.pattern == "random" then
+        
+        if tick % 8 == 0 then
+            ds.variation._target_variation = (client.random_int(0, 100) / 100) * ds.variation.variation_range
+        end
+        
+        local target = ds.variation._target_variation or 0
+        local alpha = 0.15
+        ds.variation._smoothed_variation = (ds.variation._smoothed_variation or 0) * (1 - alpha) + target * alpha
+        variation_amount = ds.variation._smoothed_variation
+    end
+    
+    
+    local varied_desync = base_desync - math.abs(variation_amount)
+    
+    
+    varied_desync = func.fclamp(varied_desync, 30, 60)
+    
+    ds.variation.current_desync = varied_desync
+    
+    return varied_desync
+end
+
+
+local function handle_on_shot_desync(cmd, current_side)
+    local ds = tbl.desync_system
+    local tick = cmd.command_number
+    
+    
+    local is_attacking = bit.band(cmd.in_attack, 1) == 1
+    
+    
+    local dt_active = ui.get(menu_refs["doubletap"][1]) and ui.get(menu_refs["doubletap"][2])
+    local hs_active = ui.get(menu_refs["hideshots"][1]) and ui.get(menu_refs["hideshots"][2])
+    
+    
+    if is_attacking and tick > ds.on_shot.last_shot_tick + 4 then
+        
+        ds.on_shot.last_shot_tick = tick
+        ds.on_shot.pre_shot_side = current_side
+        ds.on_shot.should_flip = true
+        ds.on_shot.flip_until_tick = tick + ds.on_shot.flip_duration_ticks
+        
+        
+        if dt_active or hs_active then
+            ds.on_shot.flip_until_tick = tick + ds.on_shot.flip_duration_ticks + 4
+        end
+    end
+    
+    
+    if ds.on_shot.should_flip then
+        if tick > ds.on_shot.flip_until_tick then
+            ds.on_shot.should_flip = false
+        else
+            
+            return -ds.on_shot.pre_shot_side
+        end
+    end
+    
+    return current_side
+end
+
+
+local function calculate_velocity_desync_scale(lp)
+    local ds = tbl.desync_system
+    
+    if not lp then return 1.0 end
+    
+    
+    local vx, vy, vz = entity.get_prop(lp, "m_vecVelocity")
+    if not vx then return 1.0 end
+    
+    local speed = math.sqrt(vx*vx + vy*vy)
+    ds.velocity.current_speed = speed
+    
+    
+    local flags = entity.get_prop(lp, "m_fFlags") or 0
+    local on_ground = bit.band(flags, 1) == 1
+    
+    
+    local speed_ratio = speed / ds.velocity.max_speed
+    speed_ratio = func.fclamp(speed_ratio, 0, 1)
+    
+    
+    
+    local base_mult = ds.velocity.max_desync_mult - speed_ratio * (ds.velocity.max_desync_mult - ds.velocity.min_desync_mult)
+    
+    
+    if speed < 5 then
+        base_mult = base_mult * ds.velocity.standing_bonus
+    end
+    
+    
+    if not on_ground then
+        base_mult = base_mult * ds.velocity.air_penalty
+    end
+    
+    
+    local alpha = 0.2
+    ds.velocity.smoothed_mult = ds.velocity.smoothed_mult * (1 - alpha) + base_mult * alpha
+    
+    return func.fclamp(ds.velocity.smoothed_mult, ds.velocity.min_desync_mult, ds.velocity.max_desync_mult * ds.velocity.standing_bonus)
+end
+
+
+local function calculate_lean_desync_offset(lp)
+    local ds = tbl.desync_system
+    
+    if not lp then return 0 end
+    
+    
+    local lean_pose = entity.get_prop(lp, "m_flPoseParameter", 12)
+    if not lean_pose then return 0 end
+    
+    
+    local lean_amount = (lean_pose - 0.5) * 2
+    ds.lean.current_lean = lean_amount
+    
+    
+    table.insert(ds.lean.lean_history, {
+        lean = lean_amount,
+        time = globals.realtime()
+    })
+    
+    
+    while #ds.lean.lean_history > 15 do
+        table.remove(ds.lean.lean_history, 1)
+    end
+    
+    
+    if #ds.lean.lean_history >= 3 then
+        local recent = ds.lean.lean_history[#ds.lean.lean_history]
+        local older = ds.lean.lean_history[#ds.lean.lean_history - 2]
+        
+        if recent and older then
+            local lean_velocity = (recent.lean - older.lean) / math.max(0.001, recent.time - older.time)
+            ds.lean.lean_prediction = lean_velocity
+        end
+    end
+    
+    
+    local offset = 0
+    
+    if math.abs(lean_amount) > ds.lean.lean_threshold then
+        
+        
+        
+        
+        if lean_amount > 0 then
+            
+            offset = -lean_amount * 10
+        else
+            
+            offset = -lean_amount * 10
+        end
+        
+        
+        offset = offset + ds.lean.lean_prediction * 2
+    end
+    
+    ds.lean.lean_desync_offset = offset
+    
+    return func.fclamp(offset, -15, 15)
+end
+
+
+local function apply_enhanced_desync(cmd, data, base_desync, current_side)
+    local ds = tbl.desync_system
+    local lp = entity.get_local_player()
+    
+    if not lp then return base_desync, current_side end
+    
+    
+    local varied_desync = calculate_desync_variation(base_desync)
+    
+    
+    local velocity_scale = calculate_velocity_desync_scale(lp)
+    varied_desync = varied_desync * velocity_scale
+    
+    
+    local lean_offset = calculate_lean_desync_offset(lp)
+    
+    
+    
+    if lean_offset ~= 0 then
+        
+        varied_desync = varied_desync + lean_offset * 0.3
+    end
+    
+    
+    local final_side = current_side
+    if ds.on_shot.enabled then
+        final_side = handle_on_shot_desync(cmd, current_side)
+    end
+    
+    
+    varied_desync = func.fclamp(varied_desync, 20, 60)
+    
+    
+    ds.output.final_desync = varied_desync
+    ds.output.final_side = final_side
+    ds.output.confidence = velocity_scale
+    
+    return varied_desync, final_side
+end
+
+
+local function set_desync_variation_pattern(pattern)
+    if pattern == "smooth" or pattern == "stepped" or pattern == "random" then
+        tbl.desync_system.variation.pattern = pattern
+    end
+end
+
+local function set_desync_variation_range(range)
+    tbl.desync_system.variation.variation_range = func.fclamp(range, 0, 25)
+end
+
+local function set_on_shot_desync(enabled)
+    tbl.desync_system.on_shot.enabled = enabled
+end
+
+local function set_velocity_desync_limits(min_mult, max_mult)
+    tbl.desync_system.velocity.min_desync_mult = func.fclamp(min_mult, 0.3, 1.0)
+    tbl.desync_system.velocity.max_desync_mult = func.fclamp(max_mult, 0.5, 1.0)
+end
+
+
+tbl.apply_enhanced_desync = apply_enhanced_desync
+tbl.set_desync_variation_pattern = set_desync_variation_pattern
+tbl.set_desync_variation_range = set_desync_variation_range
+tbl.set_on_shot_desync = set_on_shot_desync
+tbl.set_velocity_desync_limits = set_velocity_desync_limits
+
+tbl.fakelag_system = {
+    
+    choke_sync = {
+        last_choke_count = 0,
+        choke_release_detected = false,
+        release_tick = 0,
+        pre_release_side = 0,
+        flip_on_release = true,
+        flip_duration_ticks = 4,
+        release_history = {},
+        avg_choke_length = 0
+    },
+    
+    
+    pattern = {
+        current_pattern = "default",
+        pattern_index = 0,
+        pattern_tick = 0,
+        last_pattern_change = 0,
+        pattern_change_interval = 2.0,
+        variation_seed = 0,
+        
+        
+        patterns = {
+            default = {14, 14, 14, 14},
+            alternating = {14, 7, 14, 7, 14, 7},
+            decreasing = {14, 12, 10, 8, 14, 12, 10},
+            burst = {14, 14, 3, 3, 14, 14, 3},
+            random_low = {8, 10, 12, 9, 11, 13},
+            random_high = {12, 14, 13, 14, 12, 14},
+            stutter = {14, 2, 14, 2, 14, 14, 2},
+            wave = {8, 10, 12, 14, 12, 10, 8}
+        },
+        
+        
+        pattern_weights = {
+            default = 1.0,
+            alternating = 1.2,
+            decreasing = 1.1,
+            burst = 1.15,
+            random_low = 0.9,
+            random_high = 1.0,
+            stutter = 1.25,
+            wave = 1.1
+        }
+    },
+    
+    
+    exploit = {
+        dt_active = false,
+        hs_active = false,
+        defensive_active = false,
+        exploit_detected_tick = 0,
+        
+        
+        dt_fakelag = {
+            pre_shot_choke = 1,
+            post_shot_choke = 0,
+            recharge_choke = 14
+        },
+        hs_fakelag = {
+            pre_shot_choke = 14,
+            post_shot_choke = 1,
+            during_hide_choke = 0
+        },
+        
+        
+        last_shot_tick = 0,
+        exploit_phase = "idle", 
+        phase_start_tick = 0
+    },
+    
+    
+    output = {
+        recommended_choke = 14,
+        should_flip_desync = false,
+        pattern_name = "default",
+        exploit_override = false
+    }
+}
+
+
+local function handle_choke_sync_desync(cmd, current_desync_side)
+    local fs = tbl.fakelag_system
+    local tick = cmd.command_number
+    local current_choke = cmd.chokedcommands or 0
+    
+    
+    local choke_dropped = fs.choke_sync.last_choke_count >= 6 and current_choke <= 1
+    
+    if choke_dropped then
+        
+        fs.choke_sync.choke_release_detected = true
+        fs.choke_sync.release_tick = tick
+        fs.choke_sync.pre_release_side = current_desync_side
+        
+        
+        table.insert(fs.choke_sync.release_history, {
+            tick = tick,
+            choke_length = fs.choke_sync.last_choke_count,
+            side = current_desync_side
+        })
+        
+        
+        while #fs.choke_sync.release_history > 20 do
+            table.remove(fs.choke_sync.release_history, 1)
+        end
+        
+        
+        if #fs.choke_sync.release_history >= 3 then
+            local sum = 0
+            for _, entry in ipairs(fs.choke_sync.release_history) do
+                sum = sum + entry.choke_length
+            end
+            fs.choke_sync.avg_choke_length = sum / #fs.choke_sync.release_history
+        end
+    end
+    
+    fs.choke_sync.last_choke_count = current_choke
+    
+    
+    local should_flip = false
+    local new_side = current_desync_side
+    
+    if fs.choke_sync.flip_on_release then
+        
+        local ticks_since_release = tick - fs.choke_sync.release_tick
+        
+        if ticks_since_release >= 0 and ticks_since_release < fs.choke_sync.flip_duration_ticks then
+            
+            should_flip = true
+            new_side = -fs.choke_sync.pre_release_side
+        elseif ticks_since_release >= fs.choke_sync.flip_duration_ticks then
+            
+            fs.choke_sync.choke_release_detected = false
+        end
+    end
+    
+    
+    if #fs.choke_sync.release_history >= 3 and fs.choke_sync.avg_choke_length > 0 then
+        local expected_release_in = fs.choke_sync.avg_choke_length - current_choke
+        
+        
+        if expected_release_in > 0 and expected_release_in <= 2 then
+            fs.output.should_flip_desync = true
+        end
+    end
+    
+    fs.output.should_flip_desync = should_flip
+    
+    return new_side, should_flip
+end
+
+
+local function calculate_fakelag_pattern(cmd)
+    local fs = tbl.fakelag_system
+    local now = globals.realtime()
+    local tick = cmd.command_number
+    
+    
+    local time_since_change = now - fs.pattern.last_pattern_change
+    
+    if time_since_change >= fs.pattern.pattern_change_interval then
+        fs.pattern.last_pattern_change = now
+        
+        
+        local pattern_names = {}
+        local weights = {}
+        local total_weight = 0
+        
+        for name, weight in pairs(fs.pattern.pattern_weights) do
+            table.insert(pattern_names, name)
+            table.insert(weights, weight)
+            total_weight = total_weight + weight
+        end
+        
+        
+        local rand = math.random() * total_weight
+        local cumulative = 0
+        local selected = "default"
+        
+        for i, name in ipairs(pattern_names) do
+            cumulative = cumulative + weights[i]
+            if rand <= cumulative then
+                selected = name
+                break
+            end
+        end
+        
+        
+        if selected == fs.pattern.current_pattern and #pattern_names > 1 then
+            local idx = math.random(1, #pattern_names)
+            selected = pattern_names[idx]
+        end
+        
+        fs.pattern.current_pattern = selected
+        fs.pattern.pattern_index = 0
+        fs.pattern.pattern_tick = tick
+        
+        
+        fs.pattern.pattern_change_interval = 1.5 + math.random() * 2.0
+        
+        
+        fs.pattern.variation_seed = math.random(1, 100)
+    end
+    
+    
+    local pattern = fs.pattern.patterns[fs.pattern.current_pattern]
+    if not pattern then
+        pattern = fs.pattern.patterns.default
+    end
+    
+    
+    local ticks_in_pattern = tick - fs.pattern.pattern_tick
+    fs.pattern.pattern_index = (ticks_in_pattern % #pattern) + 1
+    
+    local base_choke = pattern[fs.pattern.pattern_index]
+    
+    
+    local micro_variation = 0
+    
+    
+    if tick % 7 == 0 then
+        micro_variation = client.random_int(-1, 1)
+    end
+    
+    
+    if fs.pattern.variation_seed > 70 then
+        
+        if tick % 11 == 0 then
+            micro_variation = micro_variation + 1
+        end
+    elseif fs.pattern.variation_seed < 30 then
+        
+        if tick % 13 == 0 then
+            micro_variation = micro_variation - 1
+        end
+    end
+    
+    local final_choke = func.fclamp(base_choke + micro_variation, 1, 14)
+    
+    fs.output.pattern_name = fs.pattern.current_pattern
+    
+    return final_choke
+end
+
+
+local function calculate_exploit_aware_fakelag(cmd, base_choke)
+    local fs = tbl.fakelag_system
+    local tick = cmd.command_number
+    
+    
+    local dt_enabled = ui.get(menu_refs["doubletap"][1]) and ui.get(menu_refs["doubletap"][2])
+    local hs_enabled = ui.get(menu_refs["hideshots"][1]) and ui.get(menu_refs["hideshots"][2])
+    
+    fs.exploit.dt_active = dt_enabled
+    fs.exploit.hs_active = hs_enabled
+    
+    
+    local is_attacking = bit.band(cmd.in_attack or 0, 1) == 1
+    
+    
+    if is_attacking and tick > fs.exploit.last_shot_tick + 2 then
+        fs.exploit.last_shot_tick = tick
+        fs.exploit.exploit_phase = "shooting"
+        fs.exploit.phase_start_tick = tick
+    end
+    
+    
+    local ticks_since_shot = tick - fs.exploit.last_shot_tick
+    local ticks_in_phase = tick - fs.exploit.phase_start_tick
+    
+    if fs.exploit.exploit_phase == "shooting" then
+        if ticks_since_shot > 2 then
+            fs.exploit.exploit_phase = "post_shot"
+            fs.exploit.phase_start_tick = tick
+        end
+    elseif fs.exploit.exploit_phase == "post_shot" then
+        if dt_enabled then
+            
+            if ticks_in_phase > 4 then
+                fs.exploit.exploit_phase = "recharging"
+                fs.exploit.phase_start_tick = tick
+            end
+        elseif hs_enabled then
+            
+            if ticks_in_phase > 8 then
+                fs.exploit.exploit_phase = "idle"
+                fs.exploit.phase_start_tick = tick
+            end
+        else
+            if ticks_in_phase > 3 then
+                fs.exploit.exploit_phase = "idle"
+                fs.exploit.phase_start_tick = tick
+            end
+        end
+    elseif fs.exploit.exploit_phase == "recharging" then
+        
+        if ticks_in_phase > 16 then
+            fs.exploit.exploit_phase = "idle"
+            fs.exploit.phase_start_tick = tick
+        end
+    end
+    
+    
+    local recommended_choke = base_choke
+    local exploit_override = false
+    
+    if dt_enabled then
+        
+        if fs.exploit.exploit_phase == "shooting" then
+            
+            recommended_choke = fs.exploit.dt_fakelag.post_shot_choke
+            exploit_override = true
+        elseif fs.exploit.exploit_phase == "post_shot" then
+            
+            recommended_choke = math.min(base_choke, 4)
+            exploit_override = true
+        elseif fs.exploit.exploit_phase == "recharging" then
+            
+            recommended_choke = fs.exploit.dt_fakelag.recharge_choke
+            exploit_override = true
+        else
+            
+            recommended_choke = math.max(base_choke, 8)
+        end
+        
+    elseif hs_enabled then
+        
+        if fs.exploit.exploit_phase == "shooting" or fs.exploit.exploit_phase == "post_shot" then
+            
+            recommended_choke = fs.exploit.hs_fakelag.post_shot_choke
+            exploit_override = true
+        else
+            
+            recommended_choke = fs.exploit.hs_fakelag.pre_shot_choke
+            exploit_override = true
+        end
+    end
+    
+    
+    if tbl.breaklc and tbl.breaklc.breaking then
+        fs.exploit.defensive_active = true
+        
+        recommended_choke = 14
+        exploit_override = true
+    else
+        fs.exploit.defensive_active = false
+    end
+    
+    fs.output.recommended_choke = recommended_choke
+    fs.output.exploit_override = exploit_override
+    
+    return recommended_choke, exploit_override
+end
+
+
+local function apply_fakelag_integration(cmd, current_desync_side)
+    local fs = tbl.fakelag_system
+    
+    
+    local pattern_choke = calculate_fakelag_pattern(cmd)
+    
+    
+    local exploit_choke, exploit_override = calculate_exploit_aware_fakelag(cmd, pattern_choke)
+    
+    
+    local new_desync_side, should_flip = handle_choke_sync_desync(cmd, current_desync_side)
+    
+    
+    local final_choke = exploit_override and exploit_choke or pattern_choke
+    
+    
+    final_choke = func.fclamp(final_choke, 0, 14)
+    
+    
+    fs.output.recommended_choke = final_choke
+    fs.output.should_flip_desync = should_flip
+    
+    return final_choke, new_desync_side, should_flip
+end
+
+
+local function set_choke_sync_enabled(enabled)
+    tbl.fakelag_system.choke_sync.flip_on_release = enabled
+end
+
+local function set_fakelag_pattern(pattern_name)
+    if tbl.fakelag_system.pattern.patterns[pattern_name] then
+        tbl.fakelag_system.pattern.current_pattern = pattern_name
+        tbl.fakelag_system.pattern.last_pattern_change = globals.realtime()
+    end
+end
+
+local function add_custom_fakelag_pattern(name, choke_values)
+    if type(choke_values) == "table" and #choke_values > 0 then
+        tbl.fakelag_system.pattern.patterns[name] = choke_values
+        tbl.fakelag_system.pattern.pattern_weights[name] = 1.0
+    end
+end
+
+local function set_pattern_change_interval(min_interval, max_interval)
+    
+    tbl.fakelag_system.pattern.pattern_change_interval = min_interval + math.random() * (max_interval - min_interval)
+end
+
+
+tbl.apply_fakelag_integration = apply_fakelag_integration
+tbl.set_choke_sync_enabled = set_choke_sync_enabled
+tbl.set_fakelag_pattern = set_fakelag_pattern
+tbl.add_custom_fakelag_pattern = add_custom_fakelag_pattern
+tbl.set_pattern_change_interval = set_pattern_change_interval
+tbl.handle_choke_sync_desync = handle_choke_sync_desync
+tbl.calculate_fakelag_pattern = calculate_fakelag_pattern
+tbl.calculate_exploit_aware_fakelag = calculate_exploit_aware_fakelag
+
+tbl.exploit_aa_system = {
+    
+    dt_sync = {
+        enabled = true,
+        last_dt_shot_tick = 0,
+        pre_dt_side = 0,
+        post_dt_side = 0,
+        flip_on_dt = true,
+        dt_flip_duration = 6,
+        dt_detected = false,
+        dt_charge_level = 0,
+        shot_count_this_burst = 0,
+        last_charge_check = 0
+    },
+    
+    
+    hideshot = {
+        enabled = true,
+        hs_active = false,
+        hs_start_tick = 0,
+        pre_hs_side = 0,
+        hs_flip_mode = "opposite", 
+        hs_desync_mult = 1.15, 
+        choke_buildup = 0,
+        last_hs_state = false
+    },
+    
+    
+    defensive = {
+        enabled = true,
+        is_recharging = false,
+        recharge_start_tick = 0,
+        recharge_ticks_remaining = 0,
+        max_recharge_ticks = 14,
+        
+        
+        recharge_aa_mode = "protective", 
+        recharge_desync_mult = 1.20, 
+        recharge_jitter_mult = 0.7, 
+        
+        
+        optimal_shoot_window = false,
+        ticks_until_charged = 0,
+        last_exploit_use = 0,
+        
+        
+        exploit_type = "none", 
+        was_charged = false,
+        charge_history = {}
+    },
+    
+    
+    output = {
+        should_flip = false,
+        desync_multiplier = 1.0,
+        jitter_multiplier = 1.0,
+        recommended_side = 0,
+        exploit_state = "idle",
+        priority_override = false
+    }
+}
+
+
+local function handle_dt_sync_aa(cmd, current_side)
+    local es = tbl.exploit_aa_system
+    local dt = es.dt_sync
+    local tick = cmd.command_number
+    
+    
+    local dt_enabled = ui.get(menu_refs["doubletap"][1]) and ui.get(menu_refs["doubletap"][2])
+    
+    if not dt_enabled then
+        dt.dt_detected = false
+        dt.shot_count_this_burst = 0
+        return current_side, false
+    end
+    
+    
+    local is_attacking = bit.band(cmd.in_attack or 0, 1) == 1
+    
+    
+    if is_attacking then
+        local ticks_since_last = tick - dt.last_dt_shot_tick
+        
+        if ticks_since_last <= 2 then
+            
+            dt.shot_count_this_burst = dt.shot_count_this_burst + 1
+            dt.dt_detected = true
+        else
+            
+            dt.shot_count_this_burst = 1
+            dt.pre_dt_side = current_side
+        end
+        
+        dt.last_dt_shot_tick = tick
+        
+        
+        if dt.flip_on_dt and dt.dt_detected then
+            dt.post_dt_side = -dt.pre_dt_side
+            
+            return dt.post_dt_side, true
+        end
+    end
+    
+    
+    local ticks_since_dt = tick - dt.last_dt_shot_tick
+    
+    if dt.dt_detected and ticks_since_dt > 0 and ticks_since_dt < dt.dt_flip_duration then
+        
+        return dt.post_dt_side, true
+    elseif ticks_since_dt >= dt.dt_flip_duration then
+        
+        dt.dt_detected = false
+        dt.shot_count_this_burst = 0
+    end
+    
+    return current_side, false
+end
+
+
+local function handle_hideshot_desync(cmd, current_side, current_desync)
+    local es = tbl.exploit_aa_system
+    local hs = es.hideshot
+    local tick = cmd.command_number
+    
+    
+    local hs_enabled = ui.get(menu_refs["hideshots"][1]) and ui.get(menu_refs["hideshots"][2])
+    
+    
+    local hs_state_changed = hs_enabled ~= hs.last_hs_state
+    hs.last_hs_state = hs_enabled
+    
+    if not hs_enabled then
+        hs.hs_active = false
+        hs.choke_buildup = 0
+        return current_side, current_desync, false
+    end
+    
+    
+    local current_choke = cmd.chokedcommands or 0
+    
+    
+    if current_choke > hs.choke_buildup then
+        if not hs.hs_active then
+            
+            hs.hs_active = true
+            hs.hs_start_tick = tick
+            hs.pre_hs_side = current_side
+        end
+        hs.choke_buildup = current_choke
+    elseif current_choke < hs.choke_buildup and hs.choke_buildup >= 8 then
+        
+        hs.hs_active = false
+        hs.choke_buildup = 0
+    end
+    
+    local new_side = current_side
+    local new_desync = current_desync
+    local modified = false
+    
+    if hs.hs_active and hs.enabled then
+        modified = true
+        
+        
+        if hs.hs_flip_mode == "opposite" then
+            
+            new_side = -hs.pre_hs_side
+            
+        elseif hs.hs_flip_mode == "random" then
+            
+            if tick % 4 == 0 then
+                new_side = client.random_int(0, 1) == 0 and 1 or -1
+            end
+            
+        elseif hs.hs_flip_mode == "jitter" then
+            
+            new_side = (tick % 2 == 0) and 1 or -1
+        end
+        
+        
+        new_desync = current_desync * hs.hs_desync_mult
+        new_desync = func.fclamp(new_desync, 20, 60)
+    end
+    
+    return new_side, new_desync, modified
+end
+
+
+local function handle_defensive_recharge(cmd, current_side, current_desync, current_jitter)
+    local es = tbl.exploit_aa_system
+    local def = es.defensive
+    local tick = cmd.command_number
+    local now = globals.realtime()
+    
+    
+    local dt_enabled = ui.get(menu_refs["doubletap"][1]) and ui.get(menu_refs["doubletap"][2])
+    local hs_enabled = ui.get(menu_refs["hideshots"][1]) and ui.get(menu_refs["hideshots"][2])
+    
+    
+    if dt_enabled then
+        def.exploit_type = "dt"
+    elseif hs_enabled then
+        def.exploit_type = "hs"
+    else
+        def.exploit_type = "none"
+        def.is_recharging = false
+        def.optimal_shoot_window = true
+        return current_side, current_desync, current_jitter, false
+    end
+    
+    
+    local is_attacking = bit.band(cmd.in_attack or 0, 1) == 1
+    
+    if is_attacking then
+        def.last_exploit_use = tick
+        def.was_charged = false
+        def.is_recharging = true
+        def.recharge_start_tick = tick
+        def.recharge_ticks_remaining = def.max_recharge_ticks
+        
+        
+        table.insert(def.charge_history, {
+            tick = tick,
+            exploit_type = def.exploit_type,
+            time = now
+        })
+        
+        
+        while #def.charge_history > 20 do
+            table.remove(def.charge_history, 1)
+        end
+    end
+    
+    
+    if def.is_recharging then
+        local ticks_since_shot = tick - def.recharge_start_tick
+        def.recharge_ticks_remaining = math.max(0, def.max_recharge_ticks - ticks_since_shot)
+        def.ticks_until_charged = def.recharge_ticks_remaining
+        
+        if def.recharge_ticks_remaining <= 0 then
+            def.is_recharging = false
+            def.was_charged = true
+            def.optimal_shoot_window = true
+        else
+            def.optimal_shoot_window = false
+        end
+    else
+        def.ticks_until_charged = 0
+        def.optimal_shoot_window = true
+    end
+    
+    
+    local new_side = current_side
+    local new_desync = current_desync
+    local new_jitter = current_jitter
+    local modified = false
+    
+    if def.is_recharging and def.enabled then
+        modified = true
+        
+        
+        local recharge_progress = 1 - (def.recharge_ticks_remaining / def.max_recharge_ticks)
+        
+        if def.recharge_aa_mode == "protective" then
+            
+            
+            new_desync = current_desync * def.recharge_desync_mult
+            new_jitter = current_jitter * def.recharge_jitter_mult
+            
+            
+            
+            if def.recharge_ticks_remaining > def.max_recharge_ticks * 0.7 then
+                
+                new_side = -current_side
+            end
+            
+        elseif def.recharge_aa_mode == "aggressive" then
+            
+            
+            new_jitter = current_jitter * (1.2 + recharge_progress * 0.3)
+            
+            
+            if tick % 6 == 0 then
+                new_side = -current_side
+            end
+            
+            
+            local desync_variation = math.sin(recharge_progress * math.pi * 2) * 10
+            new_desync = current_desync + desync_variation
+            
+        elseif def.recharge_aa_mode == "random" then
+            
+            if tick % 4 == 0 then
+                new_side = client.random_int(0, 1) == 0 and 1 or -1
+            end
+            
+            new_desync = current_desync * (0.8 + math.random() * 0.4)
+            new_jitter = current_jitter * (0.7 + math.random() * 0.6)
+        end
+        
+        
+        new_desync = func.fclamp(new_desync, 20, 60)
+        new_jitter = func.fclamp(new_jitter, -60, 60)
+        
+        
+        if def.recharge_ticks_remaining <= 3 then
+            
+            
+            new_jitter = current_jitter * 0.5
+            new_desync = 60
+        end
+    end
+    
+    return new_side, new_desync, new_jitter, modified
+end
+
+
+local function apply_exploit_aa_integration(cmd, current_side, current_desync, current_jitter)
+    local es = tbl.exploit_aa_system
+    
+    local final_side = current_side
+    local final_desync = current_desync
+    local final_jitter = current_jitter
+    local any_modified = false
+    
+    
+    local dt_side, dt_modified = handle_dt_sync_aa(cmd, final_side)
+    if dt_modified then
+        final_side = dt_side
+        any_modified = true
+        es.output.exploit_state = "dt_active"
+        es.output.priority_override = true
+    end
+    
+    
+    if not dt_modified then
+        local hs_side, hs_desync, hs_modified = handle_hideshot_desync(cmd, final_side, final_desync)
+        if hs_modified then
+            final_side = hs_side
+            final_desync = hs_desync
+            any_modified = true
+            es.output.exploit_state = "hs_active"
+        end
+    end
+    
+    
+    local def_side, def_desync, def_jitter, def_modified = handle_defensive_recharge(
+        cmd, final_side, final_desync, final_jitter
+    )
+    if def_modified then
+        
+        if not dt_modified then
+            final_side = def_side
+        end
+        final_desync = def_desync
+        final_jitter = def_jitter
+        any_modified = true
+        
+        if es.output.exploit_state == "idle" then
+            es.output.exploit_state = "recharging"
+        end
+    end
+    
+    
+    es.output.should_flip = any_modified
+    es.output.desync_multiplier = final_desync / math.max(1, current_desync)
+    es.output.jitter_multiplier = math.abs(final_jitter) / math.max(1, math.abs(current_jitter))
+    es.output.recommended_side = final_side
+    
+    if not any_modified then
+        es.output.exploit_state = "idle"
+        es.output.priority_override = false
+    end
+    
+    return final_side, final_desync, final_jitter, any_modified
+end
+
+
+local function set_dt_sync_enabled(enabled)
+    tbl.exploit_aa_system.dt_sync.enabled = enabled
+end
+
+local function set_dt_flip_duration(ticks)
+    tbl.exploit_aa_system.dt_sync.dt_flip_duration = func.fclamp(ticks, 2, 14)
+end
+
+local function set_hideshot_flip_mode(mode)
+    if mode == "opposite" or mode == "random" or mode == "jitter" then
+        tbl.exploit_aa_system.hideshot.hs_flip_mode = mode
+    end
+end
+
+local function set_hideshot_desync_mult(mult)
+    tbl.exploit_aa_system.hideshot.hs_desync_mult = func.fclamp(mult, 1.0, 1.5)
+end
+
+local function set_defensive_recharge_mode(mode)
+    if mode == "protective" or mode == "aggressive" or mode == "random" then
+        tbl.exploit_aa_system.defensive.recharge_aa_mode = mode
+    end
+end
+
+local function set_defensive_desync_mult(mult)
+    tbl.exploit_aa_system.defensive.recharge_desync_mult = func.fclamp(mult, 1.0, 1.5)
+end
+
+local function is_exploit_charged()
+    return tbl.exploit_aa_system.defensive.optimal_shoot_window
+end
+
+local function get_ticks_until_charged()
+    return tbl.exploit_aa_system.defensive.ticks_until_charged
+end
+
+
+tbl.apply_exploit_aa_integration = apply_exploit_aa_integration
+tbl.set_dt_sync_enabled = set_dt_sync_enabled
+tbl.set_dt_flip_duration = set_dt_flip_duration
+tbl.set_hideshot_flip_mode = set_hideshot_flip_mode
+tbl.set_hideshot_desync_mult = set_hideshot_desync_mult
+tbl.set_defensive_recharge_mode = set_defensive_recharge_mode
+tbl.set_defensive_desync_mult = set_defensive_desync_mult
+tbl.is_exploit_charged = is_exploit_charged
+tbl.get_ticks_until_charged = get_ticks_until_charged
+tbl.handle_dt_sync_aa = handle_dt_sync_aa
+tbl.handle_hideshot_desync = handle_hideshot_desync
+tbl.handle_defensive_recharge = handle_defensive_recharge
+
+tbl.landing_aa_system = {
+    
+    detection = {
+        was_in_air = false,
+        landing_tick = 0,
+        landing_velocity = 0,
+        landing_detected = false,
+        landing_type = "normal", 
+        pre_land_state = "global"
+    },
+    
+    
+    behavior = {
+        active_until_tick = 0,
+        duration_ticks = 12,  
+        
+        
+        landing_desync_mult = 1.25,  
+        landing_jitter_mult = 0.6,   
+        landing_yaw_offset = 0,
+        
+        
+        hard_landing = {
+            desync_mult = 1.35,
+            jitter_mult = 0.4,
+            duration = 16,
+            velocity_threshold = -400
+        },
+        normal_landing = {
+            desync_mult = 1.25,
+            jitter_mult = 0.6,
+            duration = 12,
+            velocity_threshold = -250
+        },
+        soft_landing = {
+            desync_mult = 1.15,
+            jitter_mult = 0.75,
+            duration = 8,
+            velocity_threshold = -150
+        }
+    },
+    
+    
+    prediction = {
+        will_land_soon = false,
+        ticks_until_land = 0,
+        predicted_impact_velocity = 0,
+        pre_land_adjustment = false
+    },
+    
+    
+    velocity_history = {},
+    
+    
+    output = {
+        is_landing = false,
+        landing_type = "normal",
+        desync_multiplier = 1.0,
+        jitter_multiplier = 1.0,
+        yaw_offset = 0,
+        confidence = 1.0
+    }
+}
+
+
+local function detect_landing(cmd, lp)
+    local ls = tbl.landing_aa_system
+    local tick = cmd.command_number
+    
+    if not lp then return false end
+    
+    
+    local flags = entity.get_prop(lp, "m_fFlags") or 0
+    local on_ground = bit.band(flags, 1) == 1
+    local vx, vy, vz = entity.get_prop(lp, "m_vecVelocity")
+    
+    if not vx then return false end
+    
+    local vertical_velocity = vz or 0
+    
+    
+    table.insert(ls.velocity_history, {
+        tick = tick,
+        vz = vertical_velocity,
+        on_ground = on_ground
+    })
+    
+    
+    while #ls.velocity_history > 30 do
+        table.remove(ls.velocity_history, 1)
+    end
+    
+    
+    local landing_detected = false
+    local landing_type = "normal"
+    
+    if ls.detection.was_in_air and on_ground then
+        
+        landing_detected = true
+        ls.detection.landing_tick = tick
+        ls.detection.landing_velocity = vertical_velocity
+        
+        
+        if vertical_velocity < ls.behavior.hard_landing.velocity_threshold then
+            landing_type = "hard"
+        elseif vertical_velocity < ls.behavior.normal_landing.velocity_threshold then
+            landing_type = "normal"
+        else
+            landing_type = "soft"
+        end
+        
+        ls.detection.landing_type = landing_type
+        ls.detection.landing_detected = true
+        
+        
+        local config = ls.behavior[landing_type .. "_landing"]
+        ls.behavior.active_until_tick = tick + config.duration
+        
+    elseif not on_ground then
+        
+        ls.detection.landing_detected = false
+    end
+    
+    
+    ls.detection.was_in_air = not on_ground
+    
+    return landing_detected
+end
+
+
+local function predict_landing(lp)
+    local ls = tbl.landing_aa_system
+    
+    if not lp then return false end
+    
+    local flags = entity.get_prop(lp, "m_fFlags") or 0
+    local on_ground = bit.band(flags, 1) == 1
+    
+    
+    if on_ground then
+        ls.prediction.will_land_soon = false
+        ls.prediction.ticks_until_land = 0
+        return false
+    end
+    
+    local vx, vy, vz = entity.get_prop(lp, "m_vecVelocity")
+    if not vz then return false end
+    
+    local ox, oy, oz = entity.get_prop(lp, "m_vecOrigin")
+    if not oz then return false end
+    
+    
+    
+    local gravity = 800
+    local tickinterval = globals.tickinterval()
+    
+    
+    
+    local predicted_ticks = 0
+    local predicted_vz = vz
+    local predicted_oz = oz
+    
+    
+    local ground_z = oz - 100  
+    local trace_fraction, trace_entity = client.trace_line(
+        lp, ox, oy, oz, ox, oy, oz - 1000
+    )
+    
+    if trace_fraction then
+        ground_z = oz - (1000 * trace_fraction)
+    end
+    
+    
+    local max_ticks = 50
+    for i = 1, max_ticks do
+        predicted_vz = predicted_vz - gravity * tickinterval
+        predicted_oz = predicted_oz + predicted_vz * tickinterval
+        
+        if predicted_oz <= ground_z then
+            predicted_ticks = i
+            ls.prediction.predicted_impact_velocity = predicted_vz
+            break
+        end
+    end
+    
+    ls.prediction.ticks_until_land = predicted_ticks
+    
+    
+    if predicted_ticks > 0 and predicted_ticks <= 8 then
+        ls.prediction.will_land_soon = true
+        
+        
+        if ls.prediction.predicted_impact_velocity < -300 then
+            ls.prediction.pre_land_adjustment = true
+        else
+            ls.prediction.pre_land_adjustment = false
+        end
+        
+        return true
+    end
+    
+    ls.prediction.will_land_soon = false
+    ls.prediction.pre_land_adjustment = false
+    return false
+end
+
+
+local function calculate_landing_aa(cmd, current_side, current_desync, current_jitter)
+    local ls = tbl.landing_aa_system
+    local tick = cmd.command_number
+    
+    local lp = entity.get_local_player()
+    if not lp then return current_side, current_desync, current_jitter, false end
+    
+    
+    local landing_now = detect_landing(cmd, lp)
+    
+    
+    local landing_soon = predict_landing(lp)
+    
+    
+    local landing_active = tick < ls.behavior.active_until_tick
+    
+    if not landing_active and not landing_soon then
+        ls.output.is_landing = false
+        return current_side, current_desync, current_jitter, false
+    end
+    
+    local modified = false
+    local new_side = current_side
+    local new_desync = current_desync
+    local new_jitter = current_jitter
+    
+    
+    if landing_active then
+        modified = true
+        
+        local landing_type = ls.detection.landing_type
+        local config = ls.behavior[landing_type .. "_landing"]
+        
+        
+        local ticks_since_land = tick - ls.detection.landing_tick
+        local progress = ticks_since_land / config.duration
+        
+        
+        local fade_factor = 1.0 - progress
+        fade_factor = func.fclamp(fade_factor, 0, 1)
+        
+        
+        local desync_mult = 1.0 + (config.desync_mult - 1.0) * fade_factor
+        new_desync = current_desync * desync_mult
+        
+        
+        local jitter_mult = 1.0 - (1.0 - config.jitter_mult) * fade_factor
+        new_jitter = current_jitter * jitter_mult
+        
+        
+        if landing_type == "hard" then
+            
+            if ticks_since_land < 8 then
+                new_side = -current_side
+            end
+            
+            
+            ls.behavior.landing_yaw_offset = math.sin(ticks_since_land * 0.5) * 8
+            
+        elseif landing_type == "normal" then
+            
+            if ticks_since_land < 4 then
+                new_side = -current_side
+            end
+            
+            ls.behavior.landing_yaw_offset = 0
+            
+        elseif landing_type == "soft" then
+            
+            ls.behavior.landing_yaw_offset = 0
+        end
+        
+        
+        new_desync = func.fclamp(new_desync, 20, 60)
+        new_jitter = func.fclamp(new_jitter, -60, 60)
+        
+        ls.output.is_landing = true
+        ls.output.landing_type = landing_type
+        ls.output.confidence = fade_factor
+        
+    elseif landing_soon and ls.prediction.pre_land_adjustment then
+        
+        modified = true
+        
+        
+        local pre_land_mult = 1.0 + (ls.prediction.ticks_until_land / 8) * 0.15
+        new_desync = current_desync * pre_land_mult
+        
+        
+        new_jitter = current_jitter * 0.85
+        
+        new_desync = func.fclamp(new_desync, 20, 60)
+        new_jitter = func.fclamp(new_jitter, -60, 60)
+        
+        ls.output.is_landing = false
+        ls.output.confidence = 0.5
+    end
+    
+    ls.output.desync_multiplier = new_desync / math.max(1, current_desync)
+    ls.output.jitter_multiplier = math.abs(new_jitter) / math.max(1, math.abs(current_jitter))
+    ls.output.yaw_offset = ls.behavior.landing_yaw_offset
+    
+    return new_side, new_desync, new_jitter, modified
+end
+
+
+local function set_landing_duration(landing_type, ticks)
+    local key = landing_type .. "_landing"
+    if tbl.landing_aa_system.behavior[key] then
+        tbl.landing_aa_system.behavior[key].duration = func.fclamp(ticks, 4, 24)
+    end
+end
+
+local function set_landing_desync_mult(landing_type, mult)
+    local key = landing_type .. "_landing"
+    if tbl.landing_aa_system.behavior[key] then
+        tbl.landing_aa_system.behavior[key].desync_mult = func.fclamp(mult, 1.0, 2.0)
+    end
+end
+
+local function set_landing_jitter_mult(landing_type, mult)
+    local key = landing_type .. "_landing"
+    if tbl.landing_aa_system.behavior[key] then
+        tbl.landing_aa_system.behavior[key].jitter_mult = func.fclamp(mult, 0.3, 1.0)
+    end
+end
+
+
+tbl.calculate_landing_aa = calculate_landing_aa
+tbl.set_landing_duration = set_landing_duration
+tbl.set_landing_desync_mult = set_landing_desync_mult
+tbl.set_landing_jitter_mult = set_landing_jitter_mult
+tbl.detect_landing = detect_landing
+tbl.predict_landing = predict_landing
             do
                 tbl.tickbase_override = tbl.tickbase_override or {
                     active = false,
@@ -2679,6 +4523,23 @@
                     persist_ttl = 604800,
                     max_entries = 64,
                     
+                    
+                    timing = {
+                        min_interval = 0.15,
+                        max_interval = 0.65,
+                        jitter_factor = 0.25,
+                        pattern_variance = 0.35,
+                        hit_acceleration = 0.85,
+                        miss_deceleration = 1.20,
+                        confidence_decay_rate = 0.015,
+                        lock_max_duration = 4.0,
+                        unlock_threshold = 0.45,
+                        use_entropy_pool = true,
+                        entropy_sources = {"time", "velocity", "distance", "latency"},
+                        micro_jitter = true,
+                        micro_jitter_range = 0.05
+                    },
+                    
                     decrease = { yaw = 0.65, body = 0.55, jitter = 0.5, delay_add = -1 },
                     increase = { yaw = 1.35, body = 1.45, jitter = 1.5, delay_add = 2 },
                     random = {
@@ -2688,11 +4549,6 @@
                         delay_range = { 1, 8 }
                     }
                 }
-
-                
-                
-                
-
                 local function ab_clamp(v, lo, hi)
                     return math.max(lo or -180, math.min(hi or 180, math.floor(v + 0.5)))
                 end
@@ -2863,63 +4719,155 @@
                 
                 
 
-                local function on_local_player_hit(attacker_ent)
-                    if not attacker_ent then return end
-                    
-                    local key = tostring(entity.get_steam64(attacker_ent) or attacker_ent)
-                    local now = globals.realtime()
-                    local tick = globals.tickcount()
-                    
-                    
-                    tbl.antiaim.ab.last_hit[key] = tbl.antiaim.ab.last_hit[key] or 0
-                    tbl.antiaim.ab.hit_count[key] = tbl.antiaim.ab.hit_count[key] or 0
-                    tbl.antiaim.ab.method[key] = tbl.antiaim.ab.method[key] or "decrease"
-                    
-                    
-                    if tick - tbl.antiaim.ab.last_hit[key] < AB_CONFIG.cooldown_ticks then return end
-                    
-                    
-                    if (now - (tbl.antiaim.ab.time[key] or 0)) > AB_CONFIG.window_seconds then
-                        tbl.antiaim.ab.hit_count[key] = 1
-                    else
-                        tbl.antiaim.ab.hit_count[key] = tbl.antiaim.ab.hit_count[key] + 1
-                    end
-                    
-                    tbl.antiaim.ab.last_hit[key] = tick
-                    tbl.antiaim.ab.time[key] = now
-                    
-                    
-                    if tbl.antiaim.ab.hit_count[key] >= AB_CONFIG.hits_to_cycle then
-                        cycle_method(key)
-                        tbl.antiaim.ab.hit_count[key] = 0
-                    end
-                    
-                    
-                    if tbl.antiaim.ab.hit_count[key] >= AB_CONFIG.hits_to_lock then
-                        tbl.antiaim.ab.locked[key] = true
-                    end
-                    
-                    
-                    local base = get_current_aa_values()
-                    if not base then return end
-                    
-                    local method = tbl.antiaim.ab.method[key]
-                    local adjusted = apply_method_adjustment(method, base)
-                    
-                    tbl.antiaim.ab.adjustments[key] = {
-                        values = adjusted,
-                        method = method,
-                        expires = tick + AB_CONFIG.hold_ticks,
-                        base = base
-                    }
-                    
-                    
-                    tbl.antiaim.log[key] = tbl.antiaim.log[key] or {}
-                    tbl.antiaim.log[key].method = method
-                    tbl.antiaim.log[key].last = now
-                    tbl.antiaim.log[key].locked = tbl.antiaim.ab.locked[key] or false
-                end
+local function calculate_randomized_interval(base_interval, ab_data, context)
+    local config = AB_CONFIG.timing
+    local interval = base_interval or 0.3
+    
+    
+    local variance = config.jitter_factor * interval
+    local primary_random = (math.random() - 0.5) * 2 * variance
+    interval = interval + primary_random
+    
+    
+    if math.random() < config.pattern_variance then
+        local pattern_shift = math.random() < 0.5 and 0.7 or 1.4
+        interval = interval * pattern_shift
+    end
+    
+    
+    if config.use_entropy_pool then
+        local entropy = 0
+        local entropy_count = 0
+        
+        for _, source in ipairs(config.entropy_sources) do
+            if source == "time" then
+                local rt = globals.realtime()
+                entropy = entropy + (rt - math.floor(rt)) * 1000
+                entropy_count = entropy_count + 1
+            elseif source == "latency" then
+                local latency = client.latency() * 1000
+                entropy = entropy + (latency % 25)
+                entropy_count = entropy_count + 1
+            end
+        end
+        
+        if entropy_count > 0 then
+            entropy = (entropy / entropy_count) % 1.0
+            local entropy_shift = (entropy - 0.5) * config.jitter_factor * 2
+            interval = interval * (1 + entropy_shift)
+        end
+    end
+    
+    
+    if config.micro_jitter then
+        local micro = (math.random() - 0.5) * 2 * config.micro_jitter_range
+        interval = interval + micro
+    end
+    
+    interval = func.fclamp(interval, config.min_interval, config.max_interval)
+    return interval
+end
 
+
+local function apply_confidence_decay(ab_data)
+    if not ab_data or not ab_data.locked then return end
+    
+    local config = AB_CONFIG.timing
+    local now = globals.realtime()
+    
+    if not ab_data.decay then
+        ab_data.decay = {
+            start_time = now,
+            start_confidence = ab_data.confidence or 1.0,
+            last_update = now,
+            decay_curve = "exponential"
+        }
+    end
+    
+    local decay = ab_data.decay
+    local time_locked = now - decay.start_time
+    local dt = now - decay.last_update
+    
+    
+    local base_decay = config.confidence_decay_rate * dt
+    local exp_factor = 1 + (time_locked / config.lock_max_duration)
+    local decay_amount = base_decay * exp_factor
+    
+    ab_data.confidence = math.max(0, (ab_data.confidence or 1.0) - decay_amount)
+    
+    
+    if ab_data.confidence < config.unlock_threshold or time_locked > config.lock_max_duration then
+        ab_data.locked = false
+        ab_data.decay = nil
+    end
+    
+    decay.last_update = now
+end
+
+
+local function on_local_player_hit(attacker_ent)
+    if not attacker_ent then return end
+    
+    local key = tostring(entity.get_steam64(attacker_ent) or attacker_ent)
+    local now = globals.realtime()
+    local tick = globals.tickcount()
+    
+    tbl.antiaim.ab.last_hit[key] = tbl.antiaim.ab.last_hit[key] or 0
+    tbl.antiaim.ab.hit_count[key] = tbl.antiaim.ab.hit_count[key] or 0
+    tbl.antiaim.ab.method[key] = tbl.antiaim.ab.method[key] or "decrease"
+    
+    
+    local ab_data = tbl.antiaim.ab
+    local randomized_cooldown = calculate_randomized_interval(
+        AB_CONFIG.cooldown_ticks * globals.tickinterval(),
+        ab_data,
+        {}
+    )
+    local cooldown_ticks = math.floor(randomized_cooldown / globals.tickinterval())
+    
+    if tick - ab_data.last_hit[key] < cooldown_ticks then return end
+    
+    
+    if (now - (ab_data.time[key] or 0)) > AB_CONFIG.window_seconds then
+        ab_data.hit_count[key] = 1
+    else
+        ab_data.hit_count[key] = ab_data.hit_count[key] + 1
+    end
+    
+    ab_data.last_hit[key] = tick
+    ab_data.time[key] = now
+    
+    
+    if ab_data.hit_count[key] >= AB_CONFIG.hits_to_cycle then
+        ab_data.method[key] = cycle_method(key)
+        ab_data.hit_count[key] = 0
+    end
+    
+    
+    if ab_data.hit_count[key] >= AB_CONFIG.hits_to_lock then
+        ab_data.locked[key] = true
+        ab_data.confidence = 0.95
+    end
+    
+    local base = get_current_aa_values()
+    if not base then return end
+    
+    local method = ab_data.method[key]
+    local adjusted = apply_method_adjustment(method, base)
+    
+    ab_data.adjustments[key] = {
+        values = adjusted,
+        method = method,
+        expires = tick + AB_CONFIG.hold_ticks,
+        base = base,
+        confidence = ab_data.confidence or 0.85
+    }
+    
+    tbl.antiaim.log[key] = tbl.antiaim.log[key] or {}
+    tbl.antiaim.log[key].method = method
+    tbl.antiaim.log[key].last = now
+    tbl.antiaim.log[key].locked = ab_data.locked[key] or false
+end
                 
                 
                 
@@ -3071,10 +5019,11 @@
                 local last_maint = 0
                 client.set_event_callback("paint", function()
                     local now = globals.realtime()
-                    if now - last_maint >= 60 then
-                        prune_antibf(now)
-                        save_antibf()
-                        last_maint = now
+                    
+                    for key, ab_data in pairs(tbl.antiaim.ab.adjustments or {}) do
+                        if ab_data.locked and ab_data.confidence then
+                            apply_confidence_decay(ab_data)
+                        end
                     end
                 end)
 
@@ -3984,10 +5933,10 @@
                             if arg.command_number % trigger == 1 then
                                 tbl.auto = not tbl.auto
                                 if tbl.auto then
-                                    ui.set(tbl.items.body[2], -123)
+                                    ui.set(tbl.items.body[2], -60)
                                     ui.set(tbl.items.yaw[2], tbl.clamp(ui.get(menutbl["right"]) + tbl.antiaim.manual.aa))
                                 else
-                                    ui.set(tbl.items.body[2], 123)
+                                    ui.set(tbl.items.body[2], 60)
                                     ui.set(tbl.items.yaw[2], tbl.clamp(ui.get(menutbl["left"]) + tbl.antiaim.manual.aa))
                                 end
                             end
@@ -4742,6 +6691,235 @@
                                 end
                             end
                         end
+                    end
+
+local base_desync_value = 60
+if menutbl and menutbl["custom_slider"] then
+    local ok, val = pcall(ui.get, menutbl["custom_slider"])
+    if ok and val then
+        base_desync_value = val
+    end
+elseif menutbl and menutbl["fake"] then
+    local ok, val = pcall(ui.get, menutbl["fake"])
+    if ok and val then
+        base_desync_value = val
+    end
+end
+
+
+local current_desync_side = check and 1 or -1
+
+
+if tbl.apply_enhanced_desync then
+    local desync_data = {
+        state = state,
+        team = team,
+        is_defensive = arg.force_defensive
+    }
+    
+    local ok, enhanced_desync, enhanced_side = pcall(
+        tbl.apply_enhanced_desync, 
+        arg, 
+        desync_data, 
+        base_desync_value, 
+        current_desync_side
+    )
+    
+    if ok and enhanced_desync then
+        
+        base_desync_value = enhanced_desync
+        
+        
+        if enhanced_side then
+            check = enhanced_side > 0
+        end
+    end
+end
+
+local current_fl_desync_side = check and 1 or -1
+
+
+if tbl.apply_fakelag_integration then
+    local fl_data = {
+        state = state,
+        team = team,
+        fakelag_active = fakelag,
+        hideshot_active = hideshot
+    }
+    
+    local ok, recommended_choke, new_desync_side, should_flip = pcall(
+        tbl.apply_fakelag_integration,
+        arg,
+        current_fl_desync_side
+    )
+    
+    if ok then
+        
+        if should_flip and new_desync_side then
+            check = new_desync_side > 0
+        end
+        
+        
+        if fakelag and recommended_choke then
+            
+            local dt_on = ui.get(menu_refs["doubletap"][1]) and ui.get(menu_refs["doubletap"][2])
+            local hs_on = ui.get(menu_refs["hideshots"][1]) and ui.get(menu_refs["hideshots"][2])
+            
+            if not dt_on and not hs_on then
+                
+                pcall(function()
+                    ui.set(limitfl, recommended_choke)
+                end)
+            end
+        end
+    end
+end
+client.set_event_callback("round_prestart", function()
+    
+    if tbl.fakelag_system then
+        tbl.fakelag_system.pattern.last_pattern_change = 0
+        tbl.fakelag_system.choke_sync.release_history = {}
+        tbl.fakelag_system.exploit.exploit_phase = "idle"
+        tbl.fakelag_system.exploit.last_shot_tick = 0
+    end
+end)
+
+local current_exploit_side = check and 1 or -1
+local current_exploit_desync = base_desync_value
+local current_exploit_jitter = base_jitter_value
+
+
+if tbl.apply_exploit_aa_integration then
+    local exploit_data = {
+        state = state,
+        team = team,
+        is_defensive = arg.force_defensive
+    }
+    
+    local ok, exploit_side, exploit_desync, exploit_jitter, exploit_modified = pcall(
+        tbl.apply_exploit_aa_integration,
+        arg,
+        current_exploit_side,
+        current_exploit_desync,
+        current_exploit_jitter
+    )
+    
+    if ok and exploit_modified then
+        
+        if exploit_side then
+            check = exploit_side > 0
+        end
+        
+        if exploit_desync then
+            base_desync_value = exploit_desync
+        end
+        
+        if exploit_jitter then
+            base_jitter_value = exploit_jitter
+        end
+        
+        
+        if tbl.exploit_aa_system and tbl.exploit_aa_system.output.priority_override then
+            
+        end
+    end
+end
+
+local current_landing_side = check and 1 or -1
+local current_landing_desync = base_desync_value
+local current_landing_jitter = base_jitter_value
+
+if tbl.calculate_landing_aa then
+    local ok, landing_side, landing_desync, landing_jitter, landing_modified = pcall(
+        tbl.calculate_landing_aa,
+        arg,
+        current_landing_side,
+        current_landing_desync,
+        current_landing_jitter
+    )
+    
+    if ok and landing_modified then
+        
+        if landing_side then
+            check = landing_side > 0
+        end
+        
+        if landing_desync then
+            base_desync_value = landing_desync
+        end
+        
+        if landing_jitter then
+            base_jitter_value = landing_jitter
+        end
+        
+        
+        if tbl.landing_aa_system and tbl.landing_aa_system.output.yaw_offset then
+            local current_yaw = ui.get(tbl.items.yaw[2]) or 0
+            pcall(function()
+                ui.set(tbl.items.yaw[2], current_yaw + tbl.landing_aa_system.output.yaw_offset)
+            end)
+        end
+    end
+end
+client.set_event_callback("round_prestart", function()
+    
+    if tbl.landing_aa_system then
+        local ls = tbl.landing_aa_system
+        
+        
+        ls.detection.was_in_air = false
+        ls.detection.landing_tick = 0
+        ls.detection.landing_detected = false
+        
+        
+        ls.behavior.active_until_tick = 0
+        ls.behavior.landing_yaw_offset = 0
+        
+        
+        ls.prediction.will_land_soon = false
+        ls.prediction.ticks_until_land = 0
+        ls.prediction.pre_land_adjustment = false
+        
+        
+        ls.velocity_history = {}
+        
+        
+        ls.output.is_landing = false
+        ls.output.confidence = 1.0
+    end
+end)
+
+                    local current_desync = ui.set(tbl.items.body[2], check and base_desync_value or -base_desync_value)
+
+                    
+                    local base_jitter_value = 3
+                    if menutbl and menutbl["jitter_slider"] then
+                        local ok, val = pcall(ui.get, menutbl["jitter_slider"])
+                        if ok and val then
+                            base_jitter_value = val
+                        end
+                    end
+
+                    
+                    if tbl.apply_enhanced_jitter and base_jitter_value ~= 0 then
+                        
+                        local jitter_data = {
+                            body = { current = current_desync },
+                            movement = { strafe_direction = 0 }
+                        }
+                        
+                        local ok, enhanced_jitter, speed_mod = pcall(tbl.apply_enhanced_jitter, arg, jitter_data, base_jitter_value, current_desync)
+                        if ok and enhanced_jitter then
+                            ui.set(tbl.items.jitter[2], enhanced_jitter)
+                        else
+                            
+                            local fallback_check = arg.command_number % 2 == 0
+                            ui.set(tbl.items.jitter[2], fallback_check and -base_jitter_value or base_jitter_value)
+                        end
+                    else
+                        
+                        local fallback_check = arg.command_number % 2 == 0
+                        ui.set(tbl.items.jitter[2], fallback_check and -base_jitter_value or base_jitter_value)
                     end
                 end,
                 ["reset"] = function()
@@ -14799,458 +16977,367 @@
         decay_multipoint_stats()
     end)
 
-    local weapon_body_aim_handler = {
-        last_weapon = nil,
-        original_prefer_body = nil,
-        active = false
-    }
-
-    local function should_prefer_body_aim(weapon_classname)
-        if not weapon_classname then return false end
-        
-        local classname = weapon_classname:lower()
-        
-        
-        if classname:find("revolver") or classname:find("ssg08") then
-            return false
-        end
-        
-        
-        if classname:find("pistol") or 
-        classname:find("deagle") or 
-        classname:find("elite") or 
-        classname:find("fiveseven") or 
-        classname:find("glock") or 
-        classname:find("hkp2000") or 
-        classname:find("p250") or 
-        classname:find("tec9") or 
-        classname:find("usp") or 
-        classname:find("cz75a") then
-            return true
-        end
-        
-        
-        if classname:find("awp") then
-            return true
-        end
-        
-        
-        if classname:find("g3sg1") or classname:find("scar20") then
-            return true
-        end
-        
-        return false
-    end
-
-
-    client.set_event_callback("setup_command", function(cmd)
-        local lp = entity.get_local_player()
-        if not lp or not entity.is_alive(lp) then
-            
-            if weapon_body_aim_handler.active and weapon_body_aim_handler.original_prefer_body ~= nil then
-                pcall(function()
-                    local prefer_body_ref = ui.reference("RAGE", "Aimbot", "Prefer body aim")
-                    if prefer_body_ref then
-                        ui.set(prefer_body_ref, weapon_body_aim_handler.original_prefer_body)
-                        weapon_body_aim_handler.original_prefer_body = nil
-                        weapon_body_aim_handler.active = false
-                    end
-                end)
-            end
-            return
-        end
-        
-        local weapon = entity.get_player_weapon(lp)
-        if not weapon then return end
-        
-        local classname = entity.get_classname(weapon)
-        if not classname then return end
-        
-        
-        if weapon_body_aim_handler.last_weapon ~= classname then
-            weapon_body_aim_handler.last_weapon = classname
-            
-            pcall(function()
-                local prefer_body_ref = ui.reference("RAGE", "Aimbot", "Prefer body aim")
-                if not prefer_body_ref then return end
-                
-                
-                if weapon_body_aim_handler.original_prefer_body == nil then
-                    weapon_body_aim_handler.original_prefer_body = ui.get(prefer_body_ref)
-                end
-                
-                local should_prefer = should_prefer_body_aim(classname)
-                
-                if should_prefer then
-                    ui.set(prefer_body_ref, true)
-                    weapon_body_aim_handler.active = true
-                else
-                    
-                    if weapon_body_aim_handler.original_prefer_body ~= nil then
-                        ui.set(prefer_body_ref, weapon_body_aim_handler.original_prefer_body)
-                        weapon_body_aim_handler.active = false
-                    end
-                end
-            end)
-        end
-    end)
-
-
-    client.set_event_callback("shutdown", function()
-        if weapon_body_aim_handler.original_prefer_body ~= nil then
-            pcall(function()
-                local prefer_body_ref = ui.reference("RAGE", "Aimbot", "Prefer body aim")
-                if prefer_body_ref then
-                    ui.set(prefer_body_ref, weapon_body_aim_handler.original_prefer_body)
-                end
-            end)
-        end
-    end)
-
-
-    client.set_event_callback("round_end", function()
-        if weapon_body_aim_handler.active and weapon_body_aim_handler.original_prefer_body ~= nil then
-            pcall(function()
-                local prefer_body_ref = ui.reference("RAGE", "Aimbot", "Prefer body aim")
-                if prefer_body_ref then
-                    ui.set(prefer_body_ref, weapon_body_aim_handler.original_prefer_body)
-                    weapon_body_aim_handler.original_prefer_body = nil
-                    weapon_body_aim_handler.active = false
-                end
-            end)
-        end
-    end)
-
 local resolver_optimization = {
-    
-    last_full_resolve = 0,
-    last_light_resolve = 0,
-    full_resolve_interval = 0.016,  
-    light_resolve_interval = 0.008, 
-    
-    
-    player_last_resolve = {},
-    player_resolve_interval = 0.016, 
-    threat_resolve_interval = 0.008, 
-    
-    
-    cached_results = {},
-    cache_ttl = 0.016, 
-    
-    
-    frame_budget_ms = 5.0, 
-    current_frame_time = 0,
-    
-    
-    skip_counter = 0,
-    max_players_per_frame = 5, 
-    
-    
-    detection_cache_ttl = 0.025, 
-    jitter_cache_ttl = 0.016,    
-    method_cache_ttl = 0.020     
+    max_players_per_frame = 2,  
 }
 
-local function optimized_resolve_player(ent)
-    if not ent or not entity.is_alive(ent) or entity.is_dormant(ent) then
+
+local function resolve_player(ent)
+    if not entity.is_alive(ent) or entity.is_dormant(ent) then
         return
     end
     
-    local now = globals.realtime()
-    local idx = ent
+    local data = get_player_data(ent)
+    data.last_update = globals.realtime()
     
-    
-    local last_resolve = resolver_optimization.player_last_resolve[idx] or 0
-    local is_threat = (client.current_threat() == ent)
-    
-    
-    local interval = is_threat and resolver_optimization.threat_resolve_interval 
-                                or resolver_optimization.player_resolve_interval
-    
-    
-    local cached = resolver_optimization.cached_results[idx]
-    local has_valid_cache = cached and (now - cached.time) < resolver_optimization.cache_ttl
-    
-    if (now - last_resolve) < interval and has_valid_cache then
+    local TB = tbl.tickbase_override
+    local function get_lagcomp_window()
+        local cl_interp = cvar.cl_interp:get_float()
+        local cl_interp_ratio = cvar.cl_interp_ratio:get_float()
         
-        if cached.value then
-            plist.set(ent, "Override resolver", cached.value / 60)
+        cl_interp_ratio = math.max(TB.sv_client_min_interp_ratio or 1, 
+                                    math.min(TB.sv_client_max_interp_ratio or 2, cl_interp_ratio))
+        
+        local tickrate = TB.tickrate or 64
+        local interp_time = math.max(cl_interp, cl_interp_ratio / tickrate)
+        local interp_ticks = math.floor(interp_time / globals.tickinterval())
+        
+        local max_rewind = TB.max_rewind_ticks or 12
+        local total_window = max_rewind + interp_ticks
+        
+        return {
+            interp_ticks = interp_ticks,
+            backtrack_ticks = max_rewind,
+            total_ticks = total_window,
+            tickrate = tickrate
+        }
+    end    
+    
+    local lagcomp = get_lagcomp_window()
+    local interp_delay = lagcomp.interp_ticks
+    
+    
+    if not data._calibration then
+        data._calibration = {
+            method_calibration = {},
+            prediction_history = {},
+            side_priors = {left = 0.5, right = 0.5},
+            stats = {
+                last_calibration = 0,
+                total_predictions = 0
+            }
+        }
+    end
+    
+    local calibration = data._calibration
+    
+    
+    if data.override.lock_until > 0 and globals.realtime() < data.override.lock_until then
+        local lock_age = globals.realtime() - (data.override.lock_start or data.override.time)
+        local decay_factor = math.max(0.7, 1.0 - (lock_age / resolver.config.lock_duration) * 0.3)
+        
+        local decayed_confidence = data.override.confidence * decay_factor
+        
+        if decayed_confidence < 0.5 then
+            data.override.lock_until = 0
+            data.brute.locked = false
+        else
+            return
+        end
+    end
+    
+    
+    local jitter_analysis = analyze_jitter_pattern(data)
+    data._current_jitter_analysis = jitter_analysis
+    
+    
+    local function calibrate_confidence(raw_confidence, method_name)
+        if not calibration.method_calibration[method_name] then
+            calibration.method_calibration[method_name] = {
+                A = 0, B = 0,
+                buckets = {},
+                history = {}
+            }
+            for i = 1, 10 do
+                calibration.method_calibration[method_name].buckets[i] = {
+                    count = 0,
+                    hits = 0,
+                    actual_rate = 0.5
+                }
+            end
+        end
+        
+        return func.fclamp(raw_confidence, 0.1, 0.95)
+    end
+    
+    
+    local methods = {
+        {name = "adaptive_brute", func = adaptive_bruteforce, base_weight = 1.0},
+        {name = "body_delta", func = body_delta_method, base_weight = 1.2},
+        {name = "body_shot", func = body_shot_resolver, base_weight = 1.4},
+        {name = "strafe", func = strafe_prediction, base_weight = 1.0},
+        {name = "flip_pattern", func = flip_pattern_detection, base_weight = 1.1},
+        {name = "markov", func = markov_learning, base_weight = 1.5},
+        {name = "distance", func = distance_resolver, base_weight = 0.9},
+        {name = "aa_type", func = detect_aa_type, base_weight = 1.3}
+    }
+    
+    local raw_predictions = {}
+    
+    
+    if jitter_analysis.predictable and jitter_analysis.confidence > 0.70 then
+        table.insert(raw_predictions, {
+            value = jitter_analysis.next_side,
+            raw_confidence = jitter_analysis.confidence,
+            source = "jitter_pattern",
+            weight = 1.2,
+            method_accuracy = 0.7,
+            side = jitter_analysis.next_side > 0 and "right" or "left"
+        })
+    end
+    
+    
+    for _, method in ipairs(methods) do
+        local prediction, confidence = method.func(ent, data)
+        
+        if prediction ~= 0 and confidence > 0.15 then
+            table.insert(raw_predictions, {
+                value = prediction,
+                raw_confidence = confidence,
+                source = method.name,
+                weight = method.base_weight,
+                method_accuracy = 0.5,
+                side = prediction > 0 and "right" or "left"
+            })
+        end
+    end
+    
+    if #raw_predictions == 0 then
+        local pose = entity.get_prop(ent, "m_flPoseParameter", 11)
+        if pose then
+            local body_yaw = (pose * 120) - 60
+            data.override.value = body_yaw > 0 and 58 or -58
+            data.override.confidence = 0.45
+            data.override.time = globals.realtime()
+            plist.set(ent, "Override resolver", data.override.value / 60)
             plist.set(ent, "Correction active", true)
         end
         return
     end
     
     
-    local frame_start = globals.realtime()
+    local calibrated_predictions = {}
     
-    
-    local data = get_player_data(ent)
-    data.last_update = now
-    
-    
-    
-    
-    
-    local detection_cache_valid = data._enhanced_cache and 
-        (now - data._enhanced_cache.time) < resolver_optimization.detection_cache_ttl
-    
-    
-    if not detection_cache_valid or is_threat then
-        local tb_data = detect_tickbase_exploitation(ent)
-        local fd_data = detect_fakeduck(ent)
-        local sm_data = update_resolver_state_machine(ent, data)
+    for _, pred in ipairs(raw_predictions) do
+        local calibrated_conf = calibrate_confidence(pred.raw_confidence, pred.source)
         
-        data._enhanced_cache = {
-            tickbase = tb_data,
-            fakeduck = fd_data,
-            state_machine = sm_data,
-            time = now
-        }
-        
-        data._tickbase = tb_data
-        data._fakeduck = fd_data
-        data._state_machine = sm_data
-    end
-    
-    
-    
-    
-    
-    local jitter_analysis
-    local jitter_cache_valid = data._jitter_cache and 
-        (now - data._jitter_cache.time) < resolver_optimization.jitter_cache_ttl
-    
-    if jitter_cache_valid and not is_threat then
-        jitter_analysis = data._jitter_cache.result
-    else
-        jitter_analysis = analyze_jitter_pattern(data)
-        data._jitter_cache = {
-            result = jitter_analysis,
-            time = now
-        }
-    end
-    data._current_jitter_analysis = jitter_analysis
-    
-    
-    
-    
-    
-    local predictions = {}
-    
-    
-    if jitter_analysis.predictable and jitter_analysis.confidence > 0.60 then
-        table.insert(predictions, {
-            value = jitter_analysis.next_side,
-            confidence = jitter_analysis.confidence,
-            source = "jitter_pattern",
-            weight = 1.40
+        table.insert(calibrated_predictions, {
+            value = pred.value,
+            confidence = calibrated_conf,
+            source = pred.source,
+            weight = pred.weight,
+            method_accuracy = pred.method_accuracy,
+            side = pred.side
         })
     end
     
     
-    local methods = {
-        {name = "body_shot", func = body_shot_resolver, weight = 1.4, always_run = true},
-        {name = "body_delta", func = body_delta_method, weight = 1.2, always_run = false},
-        {name = "strafe", func = strafe_prediction, weight = 1.0, always_run = false},
-        {name = "flip_pattern", func = flip_pattern_detection, weight = 1.15, always_run = is_threat},
-        {name = "markov", func = markov_learning, weight = 1.5, always_run = is_threat},
-        {name = "distance", func = distance_resolver, weight = 0.9, always_run = false},
-        {name = "aa_type", func = detect_aa_type, weight = 1.3, always_run = is_threat}
-    }
-    
-    
-    for _, method in ipairs(methods) do
-        local cache_key = "_method_cache_" .. method.name
-        local method_cache = data[cache_key]
-        local method_cache_valid = method_cache and 
-            (now - method_cache.time) < resolver_optimization.method_cache_ttl
+    local function bayesian_fusion(predictions)
+        local left_predictions = {}
+        local right_predictions = {}
         
-        local pred, conf
+        for _, pred in ipairs(predictions) do
+            if pred.side == "left" then
+                table.insert(left_predictions, pred)
+            else
+                table.insert(right_predictions, pred)
+            end
+        end
         
-        if method_cache_valid and not method.always_run then
-            pred = method_cache.pred
-            conf = method_cache.conf
-        else
-            local ok
-            ok, pred, conf = pcall(method.func, ent, data)
+        local function calculate_side_posterior(side_predictions, other_predictions, prior)
+            local likelihood = 1.0
+            for _, pred in ipairs(side_predictions) do
+                likelihood = likelihood * pred.confidence
+            end
             
-            if ok then
-                data[cache_key] = {
-                    pred = pred,
-                    conf = conf,
-                    time = now
-                }
-            else
-                pred, conf = 0, 0
+            local anti_likelihood = 1.0
+            for _, pred in ipairs(other_predictions) do
+                anti_likelihood = anti_likelihood * (1 - pred.confidence)
             end
+            
+            local posterior = (likelihood * prior) / math.max(0.001, likelihood * prior + anti_likelihood * (1 - prior))
+            return posterior
         end
         
-        if pred ~= 0 and conf > 0.20 then
-            table.insert(predictions, {
-                value = pred,
-                confidence = conf,
-                source = method.name,
-                weight = method.weight
-            })
-        end
-    end
-    
-    
-    if #predictions < 2 then
-        local brute_pred, brute_conf = adaptive_bruteforce(ent, data)
-        if brute_pred ~= 0 then
-            table.insert(predictions, {
-                value = brute_pred,
-                confidence = brute_conf,
-                source = "bruteforce",
-                weight = 0.85
-            })
-        end
-    end
-    
-    
-    
-    
-    
-    local final_value = 0
-    local final_confidence = 0.35
-    
-    if #predictions > 0 then
-        local left_score = 0
-        local right_score = 0
-        local left_value = 0
-        local right_value = 0
+        local left_posterior = calculate_side_posterior(
+            left_predictions, 
+            right_predictions, 
+            calibration.side_priors.left
+        )
         
-        for _, pred in ipairs(predictions) do
-            local w = pred.confidence * pred.weight
-            if pred.value < 0 then
-                left_score = left_score + w
-                left_value = left_value + pred.value * w
-            else
-                right_score = right_score + w
-                right_value = right_value + pred.value * w
-            end
-        end
+        local right_posterior = calculate_side_posterior(
+            right_predictions, 
+            left_predictions, 
+            calibration.side_priors.right
+        )
         
-        if left_score > right_score then
-            final_value = left_score > 0 and (left_value / left_score) or -58
-            final_confidence = left_score / (left_score + right_score + 0.1)
+        local total = left_posterior + right_posterior
+        if total > 0 then
+            left_posterior = left_posterior / total
+            right_posterior = right_posterior / total
         else
-            final_value = right_score > 0 and (right_value / right_score) or 58
-            final_confidence = right_score / (left_score + right_score + 0.1)
+            left_posterior = 0.5
+            right_posterior = 0.5
         end
         
+        return left_posterior, right_posterior, left_predictions, right_predictions
+    end
+    
+    local left_prob, right_prob, left_preds, right_preds = bayesian_fusion(calibrated_predictions)
+    
+    
+    local winning_side = left_prob > right_prob and "left" or "right"
+    local winning_prob = math.max(left_prob, right_prob)
+    local winning_predictions = winning_side == "left" and left_preds or right_preds
+    
+    
+    local final_yaw = 0
+    
+    if #winning_predictions > 0 then
+        local weighted_sum = 0
+        local weight_sum = 0
         
-        local common = {-58, -45, -30, 30, 45, 58}
-        for _, angle in ipairs(common) do
-            if math.abs(final_value - angle) < 8 then
-                final_value = angle
-                break
-            end
+        for _, pred in ipairs(winning_predictions) do
+            local weight = pred.confidence * pred.weight
+            weighted_sum = weighted_sum + pred.value * weight
+            weight_sum = weight_sum + weight
         end
         
-        
-        local agreement_count = 0
-        local first_sign = final_value > 0 and 1 or -1
-        for _, pred in ipairs(predictions) do
-            if (pred.value > 0 and first_sign > 0) or (pred.value < 0 and first_sign < 0) then
-                agreement_count = agreement_count + 1
-            end
+        if weight_sum > 0 then
+            final_yaw = weighted_sum / weight_sum
+        else
+            final_yaw = winning_side == "left" and -58 or 58
         end
-        
-        local agreement_bonus = (#predictions >= 2) and (agreement_count / #predictions * 0.12) or 0
-        final_confidence = func.fclamp(final_confidence * 0.55 + 0.32 + agreement_bonus, 0.35, 0.92)
     else
-        
-        local pose = entity.get_prop(ent, "m_flPoseParameter", 11)
-        if pose then
-            local body = (pose * 120) - 60
-            final_value = body > 0 and 58 or -58
-            final_confidence = 0.42
+        final_yaw = winning_side == "left" and -58 or 58
+    end
+    
+    
+    local common_angles = {-58, -45, -30, -15, 15, 30, 45, 58}
+    local snap_tolerance = resolver.config.angle_tolerance or 8
+    
+    for _, angle in ipairs(common_angles) do
+        if math.abs(final_yaw - angle) < snap_tolerance then
+            final_yaw = angle
+            break
         end
     end
     
     
-    
-    
-    
-    local tb = data._tickbase
-    local fd = data._fakeduck
-    local sm = data._state_machine
-    
-    local conf_mod = 1.0
-    
-    if tb and tb.defensive_active then
-        conf_mod = conf_mod * 0.92
+    if winning_side == "left" and final_yaw > 0 then
+        final_yaw = -math.abs(final_yaw)
+    elseif winning_side == "right" and final_yaw < 0 then
+        final_yaw = math.abs(final_yaw)
     end
     
-    if fd and fd.is_fakeducking then
-        conf_mod = conf_mod * 0.88
-        data._fakeduck_z_offset = fd.optimal_z_offset
+    final_yaw = func.fclamp(final_yaw, -60, 60)
+    
+    
+    local final_confidence = winning_prob
+    
+    
+    local agreement_bonus = 0
+    if #winning_predictions >= 2 then
+        local angle_variance = 0
+        local mean_angle = final_yaw
+        
+        for _, pred in ipairs(winning_predictions) do
+            angle_variance = angle_variance + (pred.value - mean_angle)^2
+        end
+        angle_variance = angle_variance / #winning_predictions
+        
+        local agreement_factor = 1.0 / (1.0 + math.sqrt(angle_variance) * 0.05)
+        agreement_bonus = (agreement_factor - 0.5) * 0.15
     end
     
-    if sm and sm.current_state == "static" and sm.state_confidence > 0.7 then
-        conf_mod = conf_mod * 1.08
+    
+    local source_bonus = math.min(0.10, (#winning_predictions - 1) * 0.025)
+    
+    
+    local avg_accuracy = 0
+    for _, pred in ipairs(winning_predictions) do
+        avg_accuracy = avg_accuracy + (pred.method_accuracy or 0.5)
     end
+    avg_accuracy = avg_accuracy / math.max(1, #winning_predictions)
+    local accuracy_bonus = (avg_accuracy - 0.5) * 0.15
     
-    final_confidence = func.fclamp(final_confidence * conf_mod, 0.32, 0.93)
-    final_value = func.fclamp(final_value, -60, 60)
-    
-    
-    
+    final_confidence = final_confidence + agreement_bonus + source_bonus + accuracy_bonus
     
     
-    data.override.value = final_value
-    data.override.confidence = final_confidence
-    data.override.time = now
+    local interp_penalty = interp_delay * 0.008
+    final_confidence = final_confidence - interp_penalty
     
-    plist.set(ent, "Override resolver", final_value / 60)
-    plist.set(ent, "Correction active", true)
+    final_confidence = func.fclamp(final_confidence, 0.25, 0.95)
     
     
-    resolver_optimization.player_last_resolve[idx] = now
-    resolver_optimization.cached_results[idx] = {
-        value = final_value,
+    table.insert(calibration.prediction_history, {
+        predicted_side = final_yaw,
         confidence = final_confidence,
-        time = now
+        side = final_yaw > 0 and "right" or "left",
+        time = globals.realtime(),
+        hit = nil,
+        sources = {}
+    })
+    
+    for _, pred in ipairs(calibrated_predictions) do
+        local cal = calibration.method_calibration[pred.source]
+        if cal then
+            table.insert(cal.history, {
+                confidence = pred.confidence,
+                hit = nil,
+                time = globals.realtime()
+            })
+        end
+    end
+    
+    while #calibration.prediction_history > 100 do
+        table.remove(calibration.prediction_history, 1)
+    end
+    
+    
+    data.override.value = final_yaw
+    data.override.confidence = final_confidence
+    data.override.source = #winning_predictions > 0 and winning_predictions[1].source or "bayesian_fusion"
+    data.override.time = globals.realtime()
+    data.override.fusion_weights = calibrated_predictions
+    data.override.bayesian_result = {
+        left_prob = left_prob,
+        right_prob = right_prob,
+        winning_side = winning_side,
+        prediction_count = #calibrated_predictions
     }
     
+    table.insert(data.override.prediction_history, {
+        value = final_yaw,
+        confidence = final_confidence,
+        source = data.override.source,
+        time = globals.realtime(),
+        bayesian = {left = left_prob, right = right_prob}
+    })
     
-    resolver_optimization.current_frame_time = resolver_optimization.current_frame_time + 
-        (globals.realtime() - frame_start) * 1000
+    if #data.override.prediction_history > 50 then
+        table.remove(data.override.prediction_history, 1)
+    end
+    
+    
+    plist.set(ent, "Override resolver", final_yaw / 60)
+    plist.set(ent, "Correction active", true)
 end
 
-
-resolve_player = optimized_resolve_player
-
-
-local function optimized_resolver_paint()
+local function resolver_paint()
     if not resolver.enabled then
         return
     end
-    
-    local now = globals.realtime()
-    resolver_optimization.current_frame_time = 0
-    
-    
-    if resolver_optimization.skip_counter % 120 == 0 then
-        cleanup_resolver_data()
-        
-        
-        for idx, cached in pairs(resolver_optimization.cached_results) do
-            if (now - cached.time) > 2.0 then
-                resolver_optimization.cached_results[idx] = nil
-            end
-        end
-        
-        for idx, time in pairs(resolver_optimization.player_last_resolve) do
-            if (now - time) > 10.0 then
-                resolver_optimization.player_last_resolve[idx] = nil
-            end
-        end
-    end
-    resolver_optimization.skip_counter = resolver_optimization.skip_counter + 1
-    
     
     local enemies = entity.get_players(true)
     if #enemies == 0 then return end
@@ -15259,6 +17346,7 @@ local function optimized_resolver_paint()
     local threat = client.current_threat()
     local resolved_count = 0
     
+    
     if threat and entity.is_alive(threat) and not entity.is_dormant(threat) then
         resolve_player(threat)
         resolved_count = resolved_count + 1
@@ -15266,10 +17354,6 @@ local function optimized_resolver_paint()
     
     
     for _, ent in ipairs(enemies) do
-        if resolver_optimization.current_frame_time > resolver_optimization.frame_budget_ms then
-            break
-        end
-        
         if resolved_count >= resolver_optimization.max_players_per_frame then
             break
         end
@@ -15278,8 +17362,10 @@ local function optimized_resolver_paint()
             goto continue
         end
         
-        resolve_player(ent)
-        resolved_count = resolved_count + 1
+        if entity.is_alive(ent) and not entity.is_dormant(ent) then
+            resolve_player(ent)
+            resolved_count = resolved_count + 1
+        end
         
         ::continue::
     end
@@ -15391,16 +17477,14 @@ setup_resolver = function()
     client.set_event_callback("aim_miss", on_resolver_aim_miss)
     
     
-    client.set_event_callback("paint", optimized_resolver_paint)
+    client.set_event_callback("paint", resolver_paint)
     
     client.set_event_callback("round_prestart", function()
         for idx, data in pairs(resolver.players) do
-            data.brute.cycle_speed = 0.5
+            if data.brute then
+                data.brute.cycle_speed = 0.5
+            end
         end
-        
-        
-        resolver_optimization.cached_results = {}
-        resolver_optimization.player_last_resolve = {}
     end)
     
     client.set_event_callback("round_start", function()
@@ -15419,17 +17503,17 @@ end
 
 client.set_event_callback("player_death", function(e)
     local victim = client.userid_to_entindex(e.userid)
-    if victim then
-        resolver_optimization.cached_results[victim] = nil
-        resolver_optimization.player_last_resolve[victim] = nil
+    if victim and resolver.players then
+        local idx = tostring(entity.get_steam64(victim) or victim)
+        resolver.players[idx] = nil
     end
 end)
 
 client.set_event_callback("player_disconnect", function(e)
     local idx = client.userid_to_entindex(e.userid)
-    if idx then
-        resolver_optimization.cached_results[idx] = nil
-        resolver_optimization.player_last_resolve[idx] = nil
+    if idx and resolver.players then
+        local key = tostring(entity.get_steam64(idx) or idx)
+        resolver.players[key] = nil
     end
 end)
             setup_resolver()
@@ -15678,5 +17762,6 @@ end)
                 end
                 
             })
+
 
 
